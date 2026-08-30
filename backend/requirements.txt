@@ -2,3 +2,9 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1
 pydantic-settings==2.7.1
+numpy==2.2.1
+scipy==1.15.0
+
+# Optional: set `dem_raster_path` to a local Copernicus GLO-90 GeoTIFF and
+# install rasterio to read elevations from disk instead of the network.
+# rasterio==1.4.3
