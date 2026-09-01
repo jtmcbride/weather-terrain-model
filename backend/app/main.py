@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import numpy as np
@@ -287,7 +288,11 @@ async def fog_grid(request: FogGridRequest) -> FogGridResponse:
         )
 
     try:
-        result = build_fog_grid(
+        # Dijkstra over ~180,000 cells is half a second of CPU. Running it on
+        # the event loop stalls every other request for its duration, which is
+        # very visible when the client is dragging a slider.
+        result = await asyncio.to_thread(
+            build_fog_grid,
             bounds=bounds,
             grid_x=request.grid_x,
             grid_y=request.grid_y,

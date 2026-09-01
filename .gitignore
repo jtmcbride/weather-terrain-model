@@ -10,3 +10,6 @@ venv/
 # Cached elevation grids (regenerated on demand)
 .dem-cache/
 backend/.dem-cache/
+
+# Terrain tiles mirrored for local testing
+frontend/terrain/

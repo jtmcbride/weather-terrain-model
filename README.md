@@ -6,6 +6,10 @@ on the correct side of a ridge.
 
 ## Two endpoints
 
+The web client renders the fog as a slab against real 3D terrain, so the fog
+edge follows the hillside and the marine layer visibly pours through the Golden
+Gate rather than over the Marin Headlands.
+
 | Endpoint | What it does |
 | --- | --- |
 | `POST /v1/forecast-grid` | Elevation-aware IDW over temperature, precipitation, wind, humidity, dewpoint, visibility and low cloud across a Northern California domain. |
@@ -81,8 +85,11 @@ clear station east (`tests/test_fog_model.py`):
 - **Observations** — METARs from the NOAA Aviation Weather Center (free, no key)
   for twelve Bay Area stations. KHAF (coastal) versus KSFO (bay side) is the
   canonical pair that disagrees when the hills hold fog on one side.
-- **Terrain** — Copernicus GLO-90 via the Open-Meteo elevation endpoint, cached
-  to disk; or a local GeoTIFF if `dem_raster_path` is set and rasterio installed.
+- **Terrain** — Terrarium-encoded elevation tiles from the public AWS
+  `elevation-tiles-prod` bucket (free, no key) via `scripts/fetch_dem.py`, cached
+  to disk. Falls back to the Open-Meteo elevation endpoint when the cache is
+  cold, or reads a local GeoTIFF if `dem_raster_path` is set and rasterio is
+  installed.
 
 ### Model-dependent variables
 
@@ -131,9 +138,11 @@ maximum (~100 m cells) it takes ~0.5 s.
 ## Local workflow
 
 ```bash
-cp .env.example .env        # optional
+cp .env.example .env                          # optional
+cd backend && python -m scripts.fetch_dem     # optional, but makes renders instant
 docker compose up --build
-# Map:      http://localhost:8080
+# Fog map:  http://localhost:8080/fog-map.html
+# Forecast: http://localhost:8080/weather-terrain-map.html
 # API docs: http://localhost:8000/docs
 ```
 
@@ -144,37 +153,95 @@ pip install -r backend/requirements-dev.txt
 cd backend && python -m pytest
 ```
 
+## The web client
+
+`frontend/fog-map.html` is a MapLibre GL map with 3D terrain. Two render modes:
+
+- **Drape** — the fog field painted onto the terrain surface. Cheap, full
+  resolution, and the fog edge traces the topography because the data does.
+- **Volume** — one extruded column per cell, from the ground up to the
+  inversion. Because `fill-extrusion-height` is measured from the terrain,
+  `top − ground` puts every column's roof at the same absolute altitude, so the
+  slab has a genuinely flat top you can see from the side. Coarsened to about
+  5,000 columns, taking the max fog and max elevation per block so a thin ridge
+  is not averaged away.
+
+Opacity comes from `fog_fraction`, not from a colour ramp — fog is not a heat
+map, and a blue-to-red scale would read as a data overlay rather than weather.
+
+Camera presets frame the cases worth looking at: the Marin Headlands from the
+Pacific, Twin Peaks from the Sunset, and the Golden Gate gap. The **fog top**
+slider is the demo: drag it through about 280 m and watch the layer swallow
+Twin Peaks. The **terrain routing** switch turns cost distance off, so you can
+see the fog walk straight through the hills that should be stopping it.
+
+Terrain comes from the same Terrarium tiles as `scripts/fetch_dem.py`, so the
+surface the model cuts against and the surface you see are the same dataset.
+
+The map builds its fog layers on `style.load` rather than `load`: `load` waits
+for every source to finish, so a basemap host that is slow or firewalled would
+otherwise stop the fog from ever appearing.
+
+### Populating the DEM cache
+
+```bash
+cd backend && python -m scripts.fetch_dem
+```
+
+Downloads the elevation tiles covering the fog domain, max-pools them onto the
+model grid, and writes the result where `DemProvider` looks. After this the API
+never calls the Open-Meteo elevation endpoint for that viewport.
+
+The cache is keyed by `(bounds, grid_x, grid_y)`, so it defaults to fetching
+every resolution the client offers. Pass `--grid 256x280` for just one, or
+`--bounds` for a different domain.
+
+Downsampling by *maximum* is deliberate: for a barrier model what decides
+whether fog crosses a ridge is the highest ground in the cell, and a crest
+averaged away is a wall the model would let fog walk through. Against known
+summits at 420 × 420 (~110 m cells) this reads Twin Peaks 271 m (actual 281),
+Mount Davidson 281 m (283) and Hawk Hill 272 m (280). Sharp isolated peaks
+still come in low — Mount Tamalpais reads about 60 m under — which is a
+resolution limit, not a bug; raise the grid or the zoom if you need those.
+
 ## Status and next steps
 
 Implemented: fog fields and METAR ingest, the SF domain with a cached DEM and
-raster terrain features, marine-layer slab diagnosis, and cost-distance
-interpolation behind `/v1/fog-grid`.
+raster terrain features, marine-layer slab diagnosis, cost-distance
+interpolation behind `/v1/fog-grid`, and the 3D web client.
 
 Not yet built:
 
-1. **A renderer that shows it.** `frontend/weather-terrain-map.html` draws one
-   flat RGBA raster with a blur and has no terrain surface, so it cannot display
-   a hill-hugging fog layer. MapLibre GL with `setTerrain()` on a Terrain-RGB
-   source, drawing fog as a translucent surface at altitude `H` clipped against
-   the terrain, is the natural next step. Render opacity should come from
-   `fog_fraction`, not a colour ramp — fog is not a heat map.
-2. **Validation against observed fog.** The GOES-18 ABI `3.9 µm − 11.2 µm`
+1. **Validation against observed fog.** The GOES-18 ABI `3.9 µm − 11.2 µm`
    brightness-temperature difference is the standard fog/stratus mask and is
    available from the public `noaa-goes18` S3 bucket. Scoring the predicted mask
    against it, and holding out KHAF/KSFO, is the only honest way to tune the
    cost-distance parameters.
-3. **Advection.** Treating the layer as shallow water with terrain as bathymetry
+2. **Advection.** Treating the layer as shallow water with terrain as bathymetry
    and advecting `H` with the 10 m wind would make fog flow through the Gate and
    spill down the lee, rather than being re-diagnosed each hour.
+3. **In-city observations.** SFO is the only ASOS in San Francisco, so the model
+   has nothing telling it the Mission is clear while Ocean Beach is not. The
+   ridge blocking works, but without a station on each side the contrast across
+   it is a gradient rather than an edge. Weather Underground or Synoptic PWS
+   data would fix this and is the single highest-value input left.
+
+### Response size
+
+A 420 × 420 grid is four arrays of 176,400 values and serialises to about
+4.7 MB of JSON, most of it the `surface_state` strings. Fine over localhost,
+worth compressing or trimming before this goes anywhere real. The client
+defaults to 256 × 280.
 
 ### Known issue, not introduced here
 
 `grid_builder.coordinate_lattice()` emits rows south-first (index 0 = `lat_min`),
-but `drawField()` in the frontend draws row 0 at the top of the canvas, i.e.
+but `drawField()` in the forecast map draws row 0 at the top of the canvas, i.e.
 north. The existing `/v1/forecast-grid` raster is therefore rendered vertically
 mirrored. The fog path deliberately uses north-first raster order throughout
-(`providers/dem.py`) and is unaffected; fixing the legacy path means flipping one
-of the two, which changes the existing endpoint's output ordering.
+(`providers/dem.py`, and the image-source corner order in `fog-map.html`) and is
+unaffected; fixing the legacy path means flipping one of the two, which changes
+the existing endpoint's output ordering.
 
 ## Scope of the model
 
