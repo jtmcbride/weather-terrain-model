@@ -1,3 +1,7 @@
 -r requirements.txt
 pytest==8.3.4
 pytest-asyncio==0.25.2
+
+# scripts/fetch_dem.py decodes Terrarium PNG elevation tiles. Host-side
+# tooling only: the API image copies `app`, not `scripts`.
+Pillow==11.1.0

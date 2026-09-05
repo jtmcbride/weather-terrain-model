@@ -4,13 +4,16 @@ services:
       context: ./backend
     ports:
       - "8000:8000"
+    # `cp .env.example .env` to override any setting. An empty .env is fine;
+    # kept as a plain string since the long-form `path/required` mapping
+    # needs Compose v2.24+.
     env_file:
-      # Optional: `cp .env.example .env` to override any setting.
-      - path: .env
-        required: false
+      - .env
     volumes:
       - ./backend/app:/app/app
-      - dem-cache:/app/.dem-cache
+      # Bind-mounted, not a named volume, so `python -m scripts.fetch_dem`
+      # run on the host populates the cache the API actually reads.
+      - ./backend/.dem-cache:/app/.dem-cache
 
   web:
     image: nginx:1.27-alpine
@@ -20,7 +23,3 @@ services:
       - ./frontend:/usr/share/nginx/html:ro
     depends_on:
       - api
-
-volumes:
-  # Elevation grids survive container restarts; terrain does not change.
-  dem-cache:

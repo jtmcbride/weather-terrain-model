@@ -185,6 +185,7 @@ otherwise stop the fog from ever appearing.
 ### Populating the DEM cache
 
 ```bash
+pip install -r backend/requirements-dev.txt   # Pillow decodes the tiles
 cd backend && python -m scripts.fetch_dem
 ```
 
@@ -192,9 +193,28 @@ Downloads the elevation tiles covering the fog domain, max-pools them onto the
 model grid, and writes the result where `DemProvider` looks. After this the API
 never calls the Open-Meteo elevation endpoint for that viewport.
 
-The cache is keyed by `(bounds, grid_x, grid_y)`, so it defaults to fetching
-every resolution the client offers. Pass `--grid 256x280` for just one, or
-`--bounds` for a different domain.
+Terrain is static and Terrarium tiles are immutable, so the decoded tiles are
+themselves cached, one `.npy` per `z/x/y`, under `.dem-cache/tiles`. That is the
+source data rather than a derived product, so it is fetched exactly once: a
+second grid size, a shifted domain, or a rerun after a failed download all
+resample locally with no network at all. Over the default domain that is 56
+tiles and about 14 MB.
+
+```
+cold      56 tiles downloaded    8.5 s
+warm       0 tiles downloaded    0.9 s
+--grid 300x320 (new size)        0.3 s
+```
+
+The resampled cache is keyed by `(bounds, grid_x, grid_y)`, so the script
+defaults to writing every resolution the client offers. Pass `--grid 256x280`
+for just one, or `--bounds` for a different domain; both reuse whatever tiles
+are already on disk. `--no-tile-cache` bypasses the tile cache, and
+`--tile-cache-dir` moves it.
+
+`.dem-cache` is bind-mounted into the API container, so a prefetch run on the
+host is what the running API reads. It is gitignored: 14 MB of tiles is
+reproducible in under ten seconds, so it is not worth committing.
 
 Downsampling by *maximum* is deliberate: for a barrier model what decides
 whether fog crosses a ridge is the highest ground in the cell, and a crest
