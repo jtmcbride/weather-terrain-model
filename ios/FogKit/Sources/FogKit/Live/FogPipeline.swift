@@ -30,6 +30,10 @@ public struct FogReport: Sendable {
     public var slab: SlabDiagnosis
     public var method: String
     public var warnings: [String]
+    /// Seconds spent fetching (often zero: both upstreams are cached).
+    public var fetchSeconds: Double
+    /// Seconds spent in the model itself: routing, IDW and the vertical cut.
+    public var modelSeconds: Double
 }
 
 public enum FogPipelineError: Error, CustomStringConvertible {
@@ -83,6 +87,8 @@ public final class FogPipeline: Sendable {
     public func run(_ request: FogRequest, elevation: Grid<Double>) async throws -> FogReport {
         let bounds = config.bounds
         var warnings: [String] = []
+        let clock = ContinuousClock()
+        let fetchStarted = clock.now
 
         // A coarse lattice is enough for the sounding and the surface field;
         // the resolution that matters lives in the DEM, not the forecast.
@@ -136,6 +142,7 @@ public final class FogPipeline: Sendable {
             }
         }
 
+        let fetchSeconds = seconds(clock.now - fetchStarted)
         let winds = forecastPoints.compactMap { $0.values["wind_speed_10m"] }.map { $0 * kmhToMs }
         var slab = diagnoseSlab(
             levelsByPoint: forecastPoints.map(\.levels),
@@ -156,12 +163,14 @@ public final class FogPipeline: Sendable {
         options.costBeta = request.costBeta
         options.idwPower = request.idwPower
         options.edgeFeatherM = request.edgeFeatherM ?? config.edgeFeatherM
+        let modelStarted = clock.now
         let grid = try await Self.buildOffActor(
             bounds: bounds, elevation: elevation, stations: stations, slab: slab, options: options)
 
         return FogReport(
             time: forecastPoints[0].time, bounds: bounds, grid: grid, slab: slab,
-            method: grid.method, warnings: warnings + grid.warnings)
+            method: grid.method, warnings: warnings + grid.warnings,
+            fetchSeconds: fetchSeconds, modelSeconds: seconds(clock.now - modelStarted))
     }
 
     /// Dijkstra over the whole grid is tenths of a second of CPU on every core.
@@ -241,6 +250,11 @@ public final class FogPipeline: Sendable {
         } catch {
             return SourceStatus(name: "metar", ok: false, detail: "\(error)")
         }
+    }
+
+    private func seconds(_ duration: Duration) -> Double {
+        let (whole, attoseconds) = duration.components
+        return Double(whole) + Double(attoseconds) / 1e18
     }
 
     private func milliseconds(_ duration: Duration) -> Double {

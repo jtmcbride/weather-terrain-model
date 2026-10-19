@@ -240,6 +240,24 @@ which is where tests stub the network. Elevation never comes from the network
 on device; it is passed in as a bundled grid. `FOGKIT_LIVE=1 swift test
 --filter Live` runs the whole pipeline against the real upstreams.
 
+`FogRender` (same package) is the web page's render layer — Catmull-Rom resample,
+billow noise (hash bit-compatible with the JS), drape bitmap, volume blocks —
+kept out of `FogKit` for the same reason the billow stays out of the backend.
+One deliberate improvement over the page: bitmap rows are sampled at
+Web-Mercator spacing, because a map image source is linear in Mercator and the
+grid is linear in latitude (up to 49 m misregistration otherwise).
+
+Both FogKit targets compile with `-O` even in Debug (`unsafeFlags` in
+`Package.swift`, allowed for a local package). Unoptimised, the per-station
+Dijkstra took 9 s a grid in a Debug app build instead of 0.06 s.
+
+`ios/FogMap` is the app (XcodeGen: `cd ios/FogMap && xcodegen generate`). It
+bundles the DEM grids written by `backend/scripts/export_elevation_grids.py`;
+rerun that if the domain or grid presets change. The Mapbox token is in the
+gitignored `ios/Secrets.xcconfig`. The basemap is Standard (monochrome, dusk):
+fog layers live in the `middle` slot (below labels) and must stay emissive, and
+`setLights` must not be called, because it replaces Standard's light preset.
+
 `hourIndex` 0 is **00:00 UTC today**, not now — forecasts are requested with
 `timezone=UTC`, so the window starts at midnight. Use `currentHourIndex()`. The
 backend and web page have the same semantics.

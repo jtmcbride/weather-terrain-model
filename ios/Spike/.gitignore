@@ -1,4 +1,4 @@
-Secrets.xcconfig
+# The token lives in ios/Secrets.xcconfig, shared with ios/FogMap.
 FogSpike.xcodeproj/
 FogSpike/Info.plist
 build/

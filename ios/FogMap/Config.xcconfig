@@ -1,0 +1,4 @@
+// Committed. The Mapbox token lives in ios/Secrets.xcconfig (gitignored; copy
+// ios/Spike/Secrets.example.xcconfig there). Without it the map is blank.
+MAPBOX_ACCESS_TOKEN =
+#include? "../Secrets.xcconfig"

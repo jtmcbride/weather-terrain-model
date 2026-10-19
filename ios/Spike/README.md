@@ -6,7 +6,7 @@ level set times a west-to-east fade, `SyntheticFog.swift`) — renderer test onl
 
 ```bash
 brew install xcodegen
-cp Secrets.example.xcconfig Secrets.xcconfig   # paste a Mapbox public token
+cp Secrets.example.xcconfig ../Secrets.xcconfig   # paste a Mapbox public token
 venv/bin/python ios/Spike/export_elevation.py 256 280   # from the repo root
 cd ios/Spike && xcodegen generate && open FogSpike.xcodeproj
 ```
