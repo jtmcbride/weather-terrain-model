@@ -1,0 +1,4 @@
+// Committed. The token lives in Secrets.xcconfig, which is gitignored; the
+// optional include keeps the project building (with a blank map) without it.
+MAPBOX_ACCESS_TOKEN =
+#include? "Secrets.xcconfig"

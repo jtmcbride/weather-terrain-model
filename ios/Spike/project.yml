@@ -1,0 +1,42 @@
+name: FogSpike
+options:
+  bundleIdPrefix: dev.weatherterrain
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  MapboxMaps:
+    url: https://github.com/mapbox/mapbox-maps-ios.git
+    exactVersion: 11.32.0
+
+configs:
+  Debug: debug
+  Release: release
+
+targets:
+  FogSpike:
+    type: application
+    platform: iOS
+    sources:
+      - FogSpike
+    configFiles:
+      Debug: Config.xcconfig
+      Release: Config.xcconfig
+    dependencies:
+      - package: MapboxMaps
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # The spike measures render and update costs; unoptimised Swift loops
+        # would make the numbers meaningless, so Debug is optimised too.
+        SWIFT_OPTIMIZATION_LEVEL: "-O"
+    info:
+      path: FogSpike/Info.plist
+      properties:
+        CFBundleDisplayName: Fog Spike
+        MBXAccessToken: $(MAPBOX_ACCESS_TOKEN)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
