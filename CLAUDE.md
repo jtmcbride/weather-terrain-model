@@ -232,6 +232,18 @@ influence to float32 precision, plus warnings and slab source strings verbatim,
 on synthetic terrain and on the real 160 × 176 SF DEM. A 0.1 % change to the
 edge cost fails them.
 
+`FogKit/Sources/FogKit/Live/` is the data layer: `TtlCache` ← `core/cache.py`
+(same three properties, same tests), `OpenMeteo.swift` and `Metar.swift` ←
+`providers/`, and `FogPipeline` ← `main.fog_grid` + `main.sources`. The seams
+are the `ForecastSource` / `ObservationSource` protocols and `HTTPFetching`,
+which is where tests stub the network. Elevation never comes from the network
+on device; it is passed in as a bundled grid. `FOGKIT_LIVE=1 swift test
+--filter Live` runs the whole pipeline against the real upstreams.
+
+`hourIndex` 0 is **00:00 UTC today**, not now — forecasts are requested with
+`timezone=UTC`, so the window starts at midnight. Use `currentHourIndex()`. The
+backend and web page have the same semantics.
+
 Differences from the Python that are deliberate:
 - The cost graph is implicit — Dijkstra computes a cell's 8 edges from the
   elevation grid as it visits it — instead of a scipy sparse matrix.
