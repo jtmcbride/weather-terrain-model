@@ -91,6 +91,21 @@ clear station east (`tests/test_fog_model.py`):
   cold, or reads a local GeoTIFF if `dem_raster_path` is set and rasterio is
   installed.
 
+Both upstreams are free, unauthenticated, and rate limited, and the client
+scrubs a 168-hour timeline. One Open-Meteo response covers the whole forecast
+window, so responses are cached by `(coordinates, variables)` rather than by
+hour: a timeline drag is one upstream request instead of 168, which is the
+difference between a working slider and a `429`. METARs are cached for five
+minutes. An entry that has expired is still served if the refresh fails — a
+stale forecast beats a 502.
+
+`GET /v1/sources` probes both upstreams and reports what the model can actually
+see right now: latency, the upstream's own valid time, how many stations are
+reporting, which variables were dropped, and cache hit counts. `/health` says
+the process is up; this says the *data* is live. A dead upstream comes back as a
+degraded source with `ok: false`, never as a 5xx — the same contract as
+`warnings`.
+
 ### Model-dependent variables
 
 `visibility` and `boundary_layer_height` are not published by every Open-Meteo
@@ -129,11 +144,36 @@ stations used.
 | `clear` | No marine air here at all |
 
 Useful knobs: `terrain_routing: false` renders the no-barrier baseline for
-comparison, and `fog_top_override_m` explores "what does the city look like at a
-250 m marine layer".
+comparison, `fog_top_override_m` explores "what does the city look like at a
+250 m marine layer", and `edge_feather_m` sets how many metres of hillside the
+fog thins out over — the width of the band where the slab's edge cuts the DEM.
 
-At the default 256 × 280 grid a fog grid builds in ~0.2 s; at the 420 × 420
-maximum (~100 m cells) it takes ~0.5 s.
+`fog_top_override_m` asserts an inversion rather than reporting one, so on a dry
+day, where the diagnosed cloud base sits *above* the lid and there is genuinely
+no deck, the base drops to the surface instead of collapsing onto the new top.
+Without that the slider does nothing on exactly the days you reach for it. The
+`slab.source` string says when the scenario is imposed rather than observed.
+
+End-to-end response time, warm caches, on an M-series laptop: 0.5 s at the
+default 256 × 280, 1.0 s at 340 × 372, 1.5 s at 420 × 420, and 3.0 s at
+560 × 612. Nearly all of it is Dijkstra, which runs once per seeded station, so
+cost grows with cells × stations. The grid caps at 640 — about 70–90 m, which is
+where the z12 Terrarium source itself runs out of detail — but the top preset is
+opt-in for that reason.
+
+Any new grid size or domain is a cold DEM cache. Prefetch it with
+`python -m scripts.fetch_dem --grid 560x612`; the source tiles are already on
+disk, so it is a local resample with no network.
+
+### Cross-origin requests
+
+The map is a static page on `:8080` calling the API on `:8000`, so the API
+carries a CORS allowlist — `cors_allow_origins` and `cors_allow_origin_regex`
+in `config.py`. The regex admits any port on `localhost`, `127.0.0.1`,
+`0.0.0.0` and `[::1]`, because those are all the same machine but *different
+origins* to a browser, and an unlisted one fails at the preflight with
+`400 Disallowed CORS origin` — which looks exactly like the API being down.
+Add a deployed frontend to `cors_allow_origins` via `.env`.
 
 ## Local workflow
 
@@ -157,17 +197,53 @@ cd backend && python -m pytest
 
 `frontend/fog-map.html` is a MapLibre GL map with 3D terrain. Two render modes:
 
-- **Drape** — the fog field painted onto the terrain surface. Cheap, full
-  resolution, and the fog edge traces the topography because the data does.
-- **Volume** — one extruded column per cell, from the ground up to the
-  inversion. Because `fill-extrusion-height` is measured from the terrain,
-  `top − ground` puts every column's roof at the same absolute altitude, so the
-  slab has a genuinely flat top you can see from the side. Coarsened to about
-  5,000 columns, taking the max fog and max elevation per block so a thin ridge
-  is not averaged away.
+- **Drape** — the fog field painted onto the terrain surface. Cheap, and the
+  fog edge traces the topography because the data does.
+- **Volume** — extruded columns from the ground up to the inversion. Because
+  `fill-extrusion-height` is measured from the terrain, `top − ground` puts a
+  full-height column's roof at the inversion, so the slab reads as a deck from
+  the side. Coarsened to about 12,000 columns, taking the max fog and max
+  elevation per block so a thin ridge is not averaged away.
 
 Opacity comes from `fog_fraction`, not from a colour ramp — fog is not a heat
 map, and a blue-to-red scale would read as a data overlay rather than weather.
+
+### Making it look like fog rather than like a mask
+
+`fog_fraction` is a level set, exact at the DEM's ~130 m cell size. Painted one
+pixel per cell at high opacity — which is what this did originally — it is a
+flat, evenly opaque sheet whose edges are a visible staircase of DEM cells. Two
+render-stage changes fix that, and neither touches the model:
+
+1. **Smooth resampling.** The field is upsampled with a separable Catmull-Rom
+   kernel (the **Render detail** slider, 1–5 px per cell, default 3), so the fog
+   line is a curve rather than a staircase. The kernel overshoots at a hard
+   edge, so results are clamped back into 0–1 rather than allowed to ring into a
+   halo.
+2. **Billow texture.** Alpha is modulated by a tileable 5-octave fractal field,
+   weighted by `4·f·(1−f)` — strongest where the deck is thin and vanishing in
+   its dense core, which is where real stratus is ragged and where it is
+   uniform. This is *rendering*, not physics: the **Billow** slider set to 0
+   shows the model's level set exactly.
+
+Default density dropped from 0.85 to 0.5. Marine fog is translucent — the street
+grid and the hillside should read through it.
+
+In volume mode the same fractal field displaces the column roofs, so the top of
+the deck billows instead of being a plane, and thin fog gets a shorter column so
+the deck tapers into its edge rather than ending in a wall of full-height boxes.
+The displacement is deliberately low frequency: sampled per block instead, it
+makes neighbouring columns differ sharply in height, which exposes thousands of
+dark vertical side walls and reads as dirt on the screen.
+
+Density in volume mode lives in the column's *lightness*, not its alpha —
+MapLibre ignores the alpha channel of `fill-extrusion-color` entirely, so the
+data-driven `rgba()` ramp this replaced was doing nothing at all and every
+column was drawn at one flat opacity.
+
+A full rebuild — resample, repaint, and volume — costs about 40/90/170 ms at
+detail 1×/3×/5×. The resampled field is cached, so the density and billow
+sliders only repaint.
 
 Camera presets frame the cases worth looking at: the Marin Headlands from the
 Pacific, Twin Peaks from the Sunset, and the Golden Gate gap. The **fog top**
@@ -181,6 +257,16 @@ surface the model cuts against and the surface you see are the same dataset.
 The map builds its fog layers on `style.load` rather than `load`: `load` waits
 for every source to finish, so a basemap host that is slow or firewalled would
 otherwise stop the fog from ever appearing.
+
+The basemap is OpenStreetMap standard tiles, desaturated in the raster layer
+down to the grey this page was built around. It is *not* CARTO `light_all` any
+more: that endpoint now answers anonymous requests with an "API KEY REQUIRED"
+placeholder tile, which renders as grey diagonal text across the whole map.
+
+MapLibre sizes its canvas from the container at construction time, and if the
+page is still laying out then it can measure near zero and not recover, leaving
+a blank map with every other part of the page working. A `ResizeObserver` on the
+container makes that state unreachable.
 
 ### Populating the DEM cache
 

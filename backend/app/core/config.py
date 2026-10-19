@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     mist_visibility_m: float = 5000.0
     max_visibility_m: float = 24000.0       # Open-Meteo clamps around 24 km
     fog_dewpoint_depression_c: float = 2.5
+    # Vertical softness of the slab edges, in metres. Real inversions are sharp
+    # but not discontinuous, and a hard step aliases into a visible stair-step
+    # against a ~100 m DEM. Widening this softens the hillside fog line.
+    fog_edge_feather_m: float = 30.0
     fog_low_cloud_percent: float = 80.0
     default_fog_top_m: float = 300.0        # fallback marine layer depth
 
@@ -78,6 +82,33 @@ class Settings(BaseSettings):
     ]
     metar_max_age_minutes: int = 90
     use_metar_observations: bool = True
+
+    # ------------------------------------------------------------------
+    # CORS
+    # ------------------------------------------------------------------
+    # The client is a static page on a different origin, so it needs an
+    # allowlist. `localhost` and `127.0.0.1` are *different origins* to a
+    # browser even though they are the same host, and compose publishes the
+    # web container on both -- an allowlist naming only one answers the
+    # preflight with `400 Disallowed CORS origin`, which in the browser looks
+    # exactly like the API being down. The regex covers every loopback spelling
+    # and port instead of enumerating them. Safe to be broad here because
+    # `allow_credentials` is off: no cookies or auth ride on these requests.
+    # `null` is the origin a page opened straight from disk (file://) sends.
+    cors_allow_origins: list[str] = ["null"]
+    cors_allow_origin_regex: str = (
+        r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$"
+    )
+
+    # ------------------------------------------------------------------
+    # Upstream caching
+    # ------------------------------------------------------------------
+    # Both upstreams are free, unauthenticated, and rate limited. One
+    # Open-Meteo response covers the whole forecast window, so caching it by
+    # (coordinates, variables) rather than by hour makes a 168-hour timeline
+    # scrub a single request instead of a burst that earns a 429.
+    forecast_cache_ttl_seconds: float = 900.0
+    metar_cache_ttl_seconds: float = 300.0
 
 
 settings = Settings()

@@ -117,6 +117,25 @@ when the configured one is unwritable. Pillow is needed only to decode
 downloaded tiles and lives in `requirements-dev.txt` — the API image copies
 `app`, not `scripts`.
 
+### Upstream caching
+
+Both upstreams rate limit anonymous callers and the client scrubs a 168-hour
+timeline, so `app/core/cache.py` sits in front of them. Three properties matter
+and all three are pinned in `tests/test_cache.py`:
+
+- The Open-Meteo cache is keyed by **`(coordinates, variables)` and not by
+  hour** — one response covers the whole `forecast_days` window. Keying it by
+  hour turns a timeline drag into 168 identical requests and an immediate 429.
+- **Single flight.** The play button ticks faster than a cold render, so
+  concurrent misses share one upstream call rather than becoming the burst that
+  trips the limiter.
+- **Stale on error.** An expired entry is kept until it is successfully
+  replaced, and served if the refresh fails.
+
+`GET /v1/sources` probes both upstreams live and reports latency, valid time,
+reporting stations, dropped variables, and cache stats. A dead upstream is a
+degraded source in the response body, never a 5xx.
+
 ### Degradation is a feature, not an error path
 
 `visibility` and `boundary_layer_height` are model-dependent on Open-Meteo.
@@ -126,6 +145,19 @@ back to dewpoint depression plus low cloud, and Espy's approximation for the
 base. METAR fetch failure is caught and downgraded the same way. Every such path
 appends to the response's `warnings` array — that array is part of the API
 contract, so new fallbacks belong in it rather than in a log line or a 5xx.
+
+### CORS
+
+The allowlist is `cors_allow_origins` plus `cors_allow_origin_regex` in
+`config.py`, and the regex is what matters: `localhost` and `127.0.0.1` are
+different origins to a browser, compose publishes the web container on both,
+and Starlette answers an unlisted origin with `400 Disallowed CORS origin` on
+the *preflight* — which in the browser is indistinguishable from the API being
+down. Pinned in `tests/test_api.py`. Broad loopback matching is safe only
+because `allow_credentials` is off; keep it off.
+
+`app/` is bind-mounted into the container but uvicorn runs without `--reload`,
+so a config change needs `docker compose restart api` — not a rebuild.
 
 ### Configuration
 
@@ -144,9 +176,28 @@ UI, defaulting to `http://localhost:8000`; CORS origins are allowlisted in
 `fog-map.html` builds its layers on `style.load`, **not** `load` — `load` waits
 for every source, so a slow or firewalled basemap host would stop the fog from
 ever appearing. It offers a drape mode (fog painted on the terrain surface) and
-a volume mode (extruded columns, coarsened to ~5,000, taking max fog and max
+a volume mode (extruded columns, coarsened to ~12,000, taking max fog and max
 elevation per block so thin ridges survive). Opacity comes from `fog_fraction`
 directly — deliberately not a colour ramp.
+
+Everything below `prepareFogField` is **rendering, not model output**, and the
+distinction is load-bearing: `fog_fraction` is an exact level set, and the page
+resamples it with Catmull-Rom and modulates alpha with a fractal billow field
+so it reads as weather rather than as a mask. The **Billow** slider at 0 shows
+the level set exactly — keep that escape hatch. Do not push the billow into the
+backend; it is texture, not physics.
+
+Three render traps worth not rediscovering:
+
+- **MapLibre ignores the alpha channel of `fill-extrusion-color`.** Density in
+  volume mode has to live in lightness; only `fill-extrusion-opacity` applies.
+- **Volume roof displacement must be low frequency.** Sampled per block, it
+  makes neighbours differ sharply in height and exposes thousands of dark side
+  walls, which reads as dirt.
+- **CARTO `light_all` now requires an API key** and serves an "API KEY
+  REQUIRED" placeholder tile to anonymous callers. The basemap is OSM standard,
+  desaturated in the raster paint. A `ResizeObserver` on `#map` guards against
+  MapLibre initialising into a zero-size container and never recovering.
 
 Terrain tiles in the client come from the same AWS `elevation-tiles-prod`
 Terrarium source as `scripts/fetch_dem.py`, so the surface the model cuts

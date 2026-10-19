@@ -3,10 +3,13 @@ import asyncio
 
 import httpx
 
+from app.core.cache import TtlCache
+
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 ELEVATION_URL = "https://api.open-meteo.com/v1/elevation"
 ELEVATION_BATCH_SIZE = 100
 FORECAST_BATCH_SIZE = 50
+FORECAST_DAYS = 7
 
 # Always requested. Every model Open-Meteo serves carries these.
 CORE_SURFACE_VARIABLES = (
@@ -80,8 +83,20 @@ def _maybe_float(series: list | None, index: int) -> float | None:
 class OpenMeteoClient:
     """Minimal async client for weather forecasts and terrain elevation."""
 
-    def __init__(self, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self, timeout_seconds: float = 30.0, cache_ttl_seconds: float = 600.0
+    ) -> None:
         self.timeout_seconds = timeout_seconds
+        # Keyed by (coordinates, variables) and *not* by hour: one payload
+        # covers the whole forecast window. Four entries is enough for the
+        # forecast lattice and the fog lattice at both variable sets.
+        self._forecast_cache: TtlCache[list[dict]] = TtlCache(
+            ttl_seconds=cache_ttl_seconds, max_entries=4
+        )
+
+    @property
+    def cache_stats(self) -> dict[str, float | int]:
+        return self._forecast_cache.stats()
 
     # ------------------------------------------------------------------
     # Elevation
@@ -177,6 +192,43 @@ class OpenMeteoClient:
             missing=tuple(missing),
         )
 
+    async def _fetch_locations(
+        self,
+        client: httpx.AsyncClient,
+        coordinates: list[tuple[float, float]],
+        variables: tuple[str, ...],
+    ) -> list[dict]:
+        """Fetch the raw hourly series for a batch of points.
+
+        Deliberately not parameterised by ``hour_index``: one request returns
+        the whole ``forecast_days`` window, so every hour the client can scrub
+        to is already in this payload. Keying the cache on the hour instead
+        would turn a timeline drag into 168 identical upstream requests.
+        """
+        params = {
+            "latitude": ",".join(f"{lat:.5f}" for lat, _ in coordinates),
+            "longitude": ",".join(f"{lon:.5f}" for _, lon in coordinates),
+            "hourly": ",".join(variables),
+            "forecast_days": FORECAST_DAYS,
+            "timezone": "UTC",
+        }
+        response = await client.get(FORECAST_URL, params=params)
+        response.raise_for_status()
+        payload = response.json()
+        # Open-Meteo returns a bare object for one coordinate and a list for many.
+        return payload if isinstance(payload, list) else [payload]
+
+    async def _locations(
+        self,
+        client: httpx.AsyncClient,
+        coordinates: list[tuple[float, float]],
+        variables: tuple[str, ...],
+    ) -> list[dict]:
+        key = (tuple(f"{lat:.5f},{lon:.5f}" for lat, lon in coordinates), variables)
+        return await self._forecast_cache.get_or_fetch(
+            key, lambda: self._fetch_locations(client, coordinates, variables)
+        )
+
     async def _forecast_batch(
         self,
         client: httpx.AsyncClient,
@@ -185,18 +237,7 @@ class OpenMeteoClient:
         variables: tuple[str, ...],
         want_levels: bool,
     ) -> list[ForecastPoint]:
-        params = {
-            "latitude": ",".join(f"{lat:.5f}" for lat, _ in coordinates),
-            "longitude": ",".join(f"{lon:.5f}" for _, lon in coordinates),
-            "hourly": ",".join(variables),
-            "forecast_days": 7,
-            "timezone": "UTC",
-        }
-        response = await client.get(FORECAST_URL, params=params)
-        response.raise_for_status()
-        payload = response.json()
-        # Open-Meteo returns a bare object for one coordinate and a list for many.
-        locations = payload if isinstance(payload, list) else [payload]
+        locations = await self._locations(client, coordinates, variables)
         return [
             self._parse_location(location, hour_index, variables, want_levels)
             for location in locations
@@ -213,7 +254,9 @@ class OpenMeteoClient:
 
         Open-Meteo accepts comma-separated coordinate lists, so N points cost
         ceil(N / FORECAST_BATCH_SIZE) requests rather than N. One client is
-        reused across all of them.
+        reused across all of them, and the raw payloads are cached for
+        ``forecast_cache_ttl_seconds``, which is what keeps a timeline scrub or
+        the animation loop from tripping the upstream rate limiter.
 
         If the upstream rejects the optional variables (they are model-dependent),
         the request is retried once with only the core set, and the dropped names

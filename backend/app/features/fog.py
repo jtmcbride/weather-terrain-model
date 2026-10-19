@@ -289,6 +289,44 @@ def diagnose_slab(
     )
 
 
+def override_slab_top(slab: SlabDiagnosis, top_m: float) -> SlabDiagnosis:
+    """Re-diagnose the slab with the inversion asserted at ``top_m``.
+
+    This is the "what does the city look like under a 250 m marine layer"
+    control, so it has to produce a slab with thickness. Clamping the base to
+    ``min(base, top)`` alone does not: on a dry day the diagnosed base sits
+    *above* the inversion (there is no deck), and clamping collapses it onto
+    the new top, leaving an empty slab and a slider that visibly does nothing.
+
+    When the diagnosed base cannot fit under the asserted top, the base drops
+    to the surface -- which is what a marine layer of that depth actually looks
+    like at the coast -- and the source string says the scenario is imposed
+    rather than observed.
+    """
+    base_m = min(slab.base_m, top_m)
+    source = slab.source + f" (fog top overridden to {top_m:.0f} m by request"
+    if base_m >= top_m:
+        base_m = 0.0
+        source += "; the diagnosed cloud base does not fit under it, so the "
+        source += "deck is assumed to reach the surface"
+    source += ")"
+    return SlabDiagnosis(
+        base_m=base_m,
+        top_m=top_m,
+        inversion_base_m=slab.inversion_base_m,
+        inversion_strength_c=slab.inversion_strength_c,
+        lcl_m=slab.lcl_m,
+        froude_number=slab.froude_number,
+        blocking_regime=slab.blocking_regime,
+        source=source,
+        # The "no marine layer is present" warning is about the *diagnosed*
+        # slab, which this call has just replaced.
+        warnings=tuple(
+            warning for warning in slab.warnings if "no marine layer" not in warning
+        ),
+    )
+
+
 def slab_occupancy(
     elevation: np.ndarray, base_m: float, top_m: float, feather_m: float = EDGE_FEATHER_M
 ) -> np.ndarray:
@@ -333,6 +371,7 @@ def classify_surface(
     marine_influence: np.ndarray,
     base_m: float,
     top_m: float,
+    feather_m: float = EDGE_FEATHER_M,
 ) -> np.ndarray:
     """Label each cell with what a person standing there would experience.
 
@@ -345,7 +384,7 @@ def classify_surface(
     states = np.full(grid.shape, "clear", dtype=object)
     has_marine = marine_influence > 0.3
 
-    under = has_marine & (grid < base_m - EDGE_FEATHER_M)
+    under = has_marine & (grid < base_m - feather_m)
     states[under] = "under_deck"
 
     above = has_marine & (grid >= top_m)

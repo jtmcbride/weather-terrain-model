@@ -277,3 +277,117 @@ def test_an_unavailable_field_is_a_clear_422(client, monkeypatch):
 
     assert response.status_code == 422
     assert "model-dependent" in response.json()["detail"]
+
+
+# ----------------------------------------------------------------------
+# /v1/sources -- live data availability
+# ----------------------------------------------------------------------
+
+
+def test_sources_reports_both_upstreams_as_live(client):
+    body = client.get("/v1/sources").json()
+
+    assert body["live"] is True
+    by_name = {source["name"]: source for source in body["sources"]}
+    assert by_name["open-meteo"]["ok"] is True
+    assert by_name["open-meteo"]["valid_time"] == "2026-08-30T15:00"
+    assert by_name["metar"]["ok"] is True
+    assert by_name["metar"]["stations"] == ["KHAF", "KSFO"]
+
+
+def test_sources_reports_a_dead_upstream_without_failing(client, monkeypatch):
+    """A degraded source is data, not a 5xx -- same contract as `warnings`."""
+
+    async def unreachable(*args, **kwargs):
+        raise ConnectionError("no route to host")
+
+    monkeypatch.setattr(main.metar_client, "observations", unreachable)
+    response = client.get("/v1/sources")
+
+    assert response.status_code == 200
+    by_name = {source["name"]: source for source in response.json()["sources"]}
+    assert by_name["metar"]["ok"] is False
+    assert "no route to host" in by_name["metar"]["detail"]
+    # The model can still run on forecast samples alone.
+    assert response.json()["live"] is True
+
+
+def test_sources_names_the_variables_the_upstream_dropped(client, monkeypatch):
+    async def without_visibility(coordinates, hour_index, **kwargs):
+        return [
+            _forecast_point(lat, lon, missing=("visibility",))
+            for lat, lon in coordinates
+        ]
+
+    monkeypatch.setattr(main.client, "forecast_points", without_visibility)
+    body = client.get("/v1/sources").json()
+
+    by_name = {source["name"]: source for source in body["sources"]}
+    assert by_name["open-meteo"]["missing_variables"] == ["visibility"]
+    assert "visibility" in by_name["open-meteo"]["detail"]
+
+
+def test_the_edge_feather_is_a_request_level_knob(client):
+    """A wider feather softens the fog line, so more cells sit part-fogged."""
+
+    def partial_cells(feather_m: float) -> int:
+        body = client.post(
+            "/v1/fog-grid",
+            json={
+                "grid_x": GRID_X,
+                "grid_y": GRID_Y,
+                "edge_feather_m": feather_m,
+            },
+        ).json()
+        return sum(1 for value in body["fog_fraction"] if 0.02 < value < 0.98)
+
+    assert partial_cells(80.0) > partial_cells(5.0)
+
+
+# ----------------------------------------------------------------------
+# CORS
+# ----------------------------------------------------------------------
+
+
+def _preflight(client, origin: str):
+    return client.options(
+        "/v1/fog-grid",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",   # a *different* origin to a browser
+        "http://0.0.0.0:8080",
+        "http://[::1]:8080",
+        "http://localhost:3000",
+        "null",                    # a page opened straight from disk
+    ],
+)
+def test_every_local_spelling_passes_preflight(client, origin):
+    """Compose publishes the web container on loopback, and which spelling you
+    type is arbitrary. An allowlist naming only one answers `400 Disallowed
+    CORS origin`, which in the browser is indistinguishable from a dead API."""
+    response = _preflight(client, origin)
+
+    assert response.status_code == 200, response.text
+    assert response.headers["access-control-allow-origin"] == origin
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://evil.example.com",
+        "http://localhost.evil.com",     # the anchor has to reject this
+        "http://127.0.0.1.evil.com",
+    ],
+)
+def test_a_foreign_origin_is_still_refused(client, origin):
+    assert _preflight(client, origin).status_code == 400

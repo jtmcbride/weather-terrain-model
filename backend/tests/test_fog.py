@@ -4,12 +4,14 @@ import numpy as np
 import pytest
 
 from app.features.fog import (
+    SlabDiagnosis,
     diagnose_slab,
     froude_number,
     inversion_base,
     inversion_theta_jump,
     lcl_height_m,
     observed_fog_fraction,
+    override_slab_top,
     slab_occupancy,
     visibility_from_fog_fraction,
 )
@@ -226,3 +228,63 @@ def test_a_cloud_base_above_the_inversion_means_no_marine_layer():
     assert any("no marine layer" in warning for warning in slab.warnings)
     # And an empty slab must yield no fog rather than a band of half-values.
     assert slab_occupancy(np.linspace(0, 4000, 50), slab.base_m, slab.top_m).max() == 0.0
+
+
+# ----------------------------------------------------------------------
+# The fog-top override
+# ----------------------------------------------------------------------
+
+
+def _dry_day_slab() -> SlabDiagnosis:
+    """A real, common state: the air condenses above the lid, so no deck."""
+    return SlabDiagnosis(
+        base_m=545.0,
+        top_m=545.0,
+        inversion_base_m=None,
+        inversion_strength_c=None,
+        lcl_m=912.0,
+        froude_number=None,
+        blocking_regime="unknown",
+        source="boundary layer height + LCL",
+        warnings=("... no marine layer is present; the fog field is empty.",),
+    )
+
+
+def test_overriding_the_top_on_a_dry_day_still_produces_a_slab():
+    """The override is a scenario control; collapsing it to an empty slab
+    leaves the UI slider doing nothing on exactly the days you reach for it."""
+    slab = override_slab_top(_dry_day_slab(), 250.0)
+
+    assert slab.top_m == 250.0
+    assert slab.base_m < slab.top_m
+    assert "assumed to reach the surface" in slab.source
+    assert not any("no marine layer" in warning for warning in slab.warnings)
+
+
+def test_overriding_the_top_keeps_a_diagnosed_base_that_fits_under_it():
+    slab = SlabDiagnosis(
+        base_m=60.0,
+        top_m=300.0,
+        inversion_base_m=300.0,
+        inversion_strength_c=4.0,
+        lcl_m=80.0,
+        froude_number=0.6,
+        blocking_regime="blocked",
+        source="inversion base",
+        warnings=(),
+    )
+    raised = override_slab_top(slab, 450.0)
+
+    assert raised.base_m == 60.0
+    assert raised.top_m == 450.0
+    assert raised.blocking_regime == "blocked"
+
+
+def test_an_overridden_slab_actually_fogs_the_ground_below_it():
+    ground = np.array([[0.0, 120.0, 240.0, 400.0]])
+    slab = override_slab_top(_dry_day_slab(), 300.0)
+    occupancy = slab_occupancy(ground, slab.base_m, slab.top_m)
+
+    assert occupancy[0, 0] > 0.9      # sea level, deep inside the deck
+    assert occupancy[0, 1] > 0.9
+    assert occupancy[0, 3] == 0.0     # well above the asserted inversion

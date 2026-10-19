@@ -34,6 +34,27 @@ class Bounds(BaseModel):
     lon_max: float
 
 
+class SourceStatus(BaseModel):
+    """Live health of one upstream data source."""
+
+    name: str
+    ok: bool
+    latency_ms: float | None = None
+    # Upstream's own timestamp, not ours: the model is only as current as this.
+    valid_time: str | None = None
+    sample_count: int = 0
+    missing_variables: list[str] = []
+    stations: list[str] = []
+    detail: str = ""
+    cache: dict = {}
+
+
+class SourceStatusResponse(BaseModel):
+    checked_at: str
+    live: bool
+    sources: list[SourceStatus]
+
+
 class GridRequest(BaseModel):
     """Controls forecast-field sampling and terrain-aware interpolation."""
 
@@ -78,12 +99,13 @@ class FogGridRequest(BaseModel):
     The grid caps are much higher than ``GridRequest`` because fog blocking
     only becomes visible once cells are smaller than the ridge doing the
     blocking. A 400 x 400 grid over the default San Francisco domain is
-    roughly 100 m per cell.
+    roughly 100 m per cell; the 640 cap is about 70-90 m, which is where
+    the z12 Terrarium source itself runs out of detail.
     """
 
     hour_index: int = Field(default=0, ge=0, le=167)
-    grid_x: int = Field(default=256, ge=32, le=420)
-    grid_y: int = Field(default=280, ge=32, le=420)
+    grid_x: int = Field(default=256, ge=32, le=640)
+    grid_y: int = Field(default=280, ge=32, le=640)
     bounds: Bounds | None = None
 
     # Cost-distance controls. `terrain_routing=False` falls back to plain
@@ -96,6 +118,12 @@ class FogGridRequest(BaseModel):
     # "what does the city look like at a 250 m marine layer".
     fog_top_override_m: float | None = Field(default=None, ge=0.0, le=2000.0)
     use_observations: bool = True
+
+    # Vertical softness of the slab edges, in metres. The fog line is the
+    # intersection of the slab with the DEM, so this is the width of the band
+    # of hillside over which fog thins out rather than stopping at a hard
+    # contour. Wider reads as real fog; narrower shows the level set exactly.
+    edge_feather_m: float | None = Field(default=None, ge=0.0, le=200.0)
 
 
 class FogStation(BaseModel):

@@ -280,7 +280,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--grid",
-        default="160x176,256x280,340x372,420x420",
+        default="160x176,256x280,340x372,420x420,560x612",
         help=(
             "comma-separated grid_x by grid_y, e.g. 256x280,420x420. The cache "
             "is keyed by grid size, so fetch every resolution the client offers."

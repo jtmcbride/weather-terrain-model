@@ -15,6 +15,8 @@ import re
 
 import httpx
 
+from app.core.cache import TtlCache
+
 STATUTE_MILE_M = 1609.344
 FOOT_M = 0.3048
 KNOT_MS = 0.514444
@@ -184,15 +186,45 @@ def parse_metar_payload(payload: object) -> list[MetarObservation]:
 class MetarClient:
     """Fetches current METARs for a fixed set of station IDs."""
 
-    def __init__(self, url: str, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self, url: str, timeout_seconds: float = 30.0, cache_ttl_seconds: float = 300.0
+    ) -> None:
         self.url = url
         self.timeout_seconds = timeout_seconds
+        # METARs are issued hourly, with SPECIs in between. Re-asking the AWC
+        # every time the hour slider moves buys nothing and risks being
+        # throttled out of the one genuinely observed input the model has.
+        self._cache: TtlCache[list[MetarObservation]] = TtlCache(
+            ttl_seconds=cache_ttl_seconds, max_entries=4
+        )
+
+    @property
+    def cache_stats(self) -> dict[str, float | int]:
+        return self._cache.stats()
+
+    def cached_age_seconds(
+        self, station_ids: list[str], max_age_minutes: int = 90
+    ) -> float | None:
+        """Seconds since this station set was last fetched, fresh or not."""
+        return self._cache.age_seconds(self._key(station_ids, max_age_minutes))
+
+    @staticmethod
+    def _key(station_ids: list[str], max_age_minutes: int):
+        return (tuple(station_ids), max_age_minutes)
 
     async def observations(
         self, station_ids: list[str], max_age_minutes: int = 90
     ) -> list[MetarObservation]:
         if not station_ids:
             return []
+        return await self._cache.get_or_fetch(
+            self._key(station_ids, max_age_minutes),
+            lambda: self._fetch(station_ids, max_age_minutes),
+        )
+
+    async def _fetch(
+        self, station_ids: list[str], max_age_minutes: int
+    ) -> list[MetarObservation]:
         params = {
             "ids": ",".join(station_ids),
             "format": "json",

@@ -95,6 +95,9 @@ select{padding:.4rem .5rem;border-radius:var(--radius-sm);border:1px solid var(-
   aside{border-right:none;border-bottom:1px solid var(--color-divider);max-height:38vh;flex-direction:row;flex-wrap:wrap;}
   .panel{min-width:220px;flex:1;}
 }
+/* OSM standard is far more saturated than the CARTO light base this page was
+   built against; the field overlay needs a muted ground to read on top of. */
+.leaflet-tile-pane{filter:saturate(.28) brightness(1.05) contrast(.94);}
 </style>
 </head>
 <body>
@@ -206,8 +209,11 @@ themeToggle.addEventListener('click',()=>{
 });
 
 const map=L.map('map',{zoomControl:true}).setView([38.1,-121.6],7);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
-  attribution:'&copy; OpenStreetMap &copy; CARTO', maxZoom:12, minZoom:5
+// Not CARTO `light_all`: that endpoint now watermarks every anonymous tile
+// with "API KEY REQUIRED". OSM standard needs no key; the tile pane is
+// desaturated in CSS to keep the muted base this page's field overlay expects.
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  attribution:'&copy; OpenStreetMap contributors', maxZoom:12, minZoom:5
 }).addTo(map);
 
 const canvas=document.getElementById('field-canvas');

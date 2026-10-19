@@ -150,7 +150,10 @@ input[type=text]{width:100%;padding:.4rem .5rem;border-radius:var(--radius-sm);b
       </div>
       <p class="footer-note" style="margin:.15rem 0 .55rem;">Off = straight-line IDW, which walks through ridges.</p>
       <div class="row"><label for="grid-res">Grid resolution</label><span class="slider-val" id="grid-res-val">256 × 280</span></div>
-      <input type="range" id="grid-res" min="0" max="3" step="1" value="1">
+      <input type="range" id="grid-res" min="0" max="4" step="1" value="1">
+      <div class="row" style="margin-top:.6rem;"><label for="feather">Edge softness</label><span class="slider-val" id="feather-val">60 m</span></div>
+      <input type="range" id="feather" min="0" max="150" step="5" value="60">
+      <p class="footer-note" style="margin-top:.15rem;">Metres of hillside the fog thins out over. A model parameter, not a render one: it widens the band where the slab cuts the terrain.</p>
     </div>
 
     <div class="panel">
@@ -160,8 +163,18 @@ input[type=text]{width:100%;padding:.4rem .5rem;border-radius:var(--radius-sm);b
         <button data-mode="volume">Volume</button>
         <button data-mode="both">Both</button>
       </div>
-      <div class="row" style="margin-top:.7rem;"><label for="fog-opacity">Fog density</label><span class="slider-val" id="fog-opacity-val">0.85</span></div>
-      <input type="range" id="fog-opacity" min="0.1" max="1" step="0.05" value="0.85">
+      <div class="row" style="margin-top:.7rem;"><label for="fog-opacity">Fog density</label><span class="slider-val" id="fog-opacity-val">0.50</span></div>
+      <input type="range" id="fog-opacity" min="0.05" max="1" step="0.05" value="0.5">
+      <p class="footer-note" style="margin:.15rem 0 .55rem;">Marine fog is translucent — the hillside should read through it.</p>
+
+      <div class="row"><label for="detail">Render detail</label><span class="slider-val" id="detail-val">3×</span></div>
+      <input type="range" id="detail" min="1" max="5" step="1" value="3">
+      <p class="footer-note" style="margin:.15rem 0 .55rem;">Pixels per model cell. Smooth resampling between cells, so the fog line is a curve rather than a staircase of DEM cells.</p>
+
+      <div class="row"><label for="billow">Billow texture</label><span class="slider-val" id="billow-val">0.65</span></div>
+      <input type="range" id="billow" min="0" max="1" step="0.05" value="0.65">
+      <p class="footer-note" style="margin:.15rem 0 .55rem;">Render only — a fractal field weighted to the thin edges of the deck, where real stratus is ragged. Set to 0 to see the model's level set exactly.</p>
+
       <div class="row" style="margin-top:.5rem;"><label for="exaggeration">Terrain exaggeration</label><span class="slider-val" id="exaggeration-val">1.4×</span></div>
       <input type="range" id="exaggeration" min="1" max="3" step="0.1" value="1.4">
       <div class="toggle-row" style="margin-top:.3rem;">
@@ -189,6 +202,7 @@ input[type=text]{width:100%;padding:.4rem .5rem;border-radius:var(--radius-sm);b
       <div class="stat-row"><span>Flow regime</span><span id="stat-regime">—</span></div>
       <div class="stat-row"><span>Valid time</span><span id="stat-time">—</span></div>
       <div class="stat-row"><span>Stations</span><span id="stat-stations">—</span></div>
+      <div class="stat-row"><span>Live sources</span><span id="stat-sources">—</span></div>
       <p class="footer-note" style="margin-top:.5rem;" id="stat-source">—</p>
     </div>
 
@@ -252,11 +266,17 @@ const GRID_PRESETS = [
   { x: 256, y: 280, label: '256 × 280' },
   { x: 340, y: 372, label: '340 × 372' },
   { x: 420, y: 420, label: '420 × 420' },
+  { x: 560, y: 612, label: '560 × 612' },
 ];
 // Terrarium elevation tiles: free, no key, and the same source the DEM cache
 // script pulls from, so the rendered surface matches the modelled one.
 const TERRAIN_TILES = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
-const BASEMAP_TILES = 'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+// Not CARTO `light_all`: that endpoint now answers every anonymous request
+// with an "API KEY REQUIRED" placeholder tile, which renders as grey diagonal
+// text across the whole map. OSM standard needs no key. It is far more
+// saturated than a fog basemap wants, so the layer desaturates and lightens it
+// down to something closer to the grey base this page was built around.
+const BASEMAP_TILES = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
 const VIEWS = {
   headlands: { center: [-122.545, 37.792], zoom: 11.6, pitch: 72, bearing: 34 },
@@ -273,17 +293,34 @@ const state = {
   autoTop: true,
   fogTopOverride: 300,
   renderMode: 'drape',
-  fogOpacity: 0.85,
+  // Real marine fog is not opaque paint: you can see the street grid and the
+  // hillside through it. 0.85 was a wash; this lets the terrain read through.
+  fogOpacity: 0.5,
+  // Pixels per grid cell in the drape. The model resolves ~130 m; the render
+  // interpolates between those cells so the fog line is a curve, not a
+  // staircase. Render-only -- it adds no information the model did not have.
+  detail: 3,
+  // Amplitude of the render-only fractal texture. 0 shows the level set exactly.
+  billow: 0.65,
+  // Well above the 5,000 that made the deck a grid of boxes, but every block
+  // is four visible side walls, so this trades against the same artefact.
+  volumeBudget: 12000,
+  // Metres of hillside over which the fog thins out. This one *is* a model
+  // parameter, not a render trick: it widens the band where the slab's edge
+  // cuts the DEM, which is the difference between a fog line and a fog edge.
+  feather: 60,
   exaggeration: 1.4,
   showStations: true,
 };
 
 let response = null;
 let fetching = false;
+let pendingFetch = false;
 let playing = false;
 let playTimer = null;
 let markers = [];
 let styleReady = false;
+let repaintHandle = 0;
 
 const el = id => document.getElementById(id);
 
@@ -312,8 +349,8 @@ const map = new maplibregl.Map({
         type: 'raster',
         tiles: [BASEMAP_TILES],
         tileSize: 256,
-        maxzoom: 18,
-        attribution: '© OpenStreetMap © CARTO',
+        maxzoom: 19,
+        attribution: '© OpenStreetMap contributors',
       },
       terrain: {
         type: 'raster-dem',
@@ -326,7 +363,15 @@ const map = new maplibregl.Map({
     },
     layers: [
       { id: 'sky-bg', type: 'background', paint: { 'background-color': '#dfe6ea' } },
-      { id: 'basemap', type: 'raster', source: 'basemap', paint: { 'raster-opacity': 0.85 } },
+      {
+        id: 'basemap', type: 'raster', source: 'basemap',
+        paint: {
+          'raster-opacity': 0.85,
+          'raster-saturation': -0.72,
+          'raster-contrast': -0.15,
+          'raster-brightness-max': 0.94,
+        },
+      },
       {
         id: 'hillshade', type: 'hillshade', source: 'terrain',
         paint: { 'hillshade-exaggeration': 0.45, 'hillshade-shadow-color': '#5a6870' },
@@ -336,6 +381,15 @@ const map = new maplibregl.Map({
 });
 
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-left');
+
+// MapLibre sizes its canvas from the container at construction time. If the
+// page is still laying out then -- a cold cache, a webfont, a restored
+// background tab -- it measures near zero, and its own resize tracking does not
+// always recover: the canvas stays a few pixels wide and `style.load` never
+// fires, so the map is blank while every other part of the page works. This has
+// to be attached here rather than inside the `style.load` handler, because that
+// handler is precisely what does not run in the failure case.
+new ResizeObserver(() => map.resize()).observe(document.getElementById('map'));
 
 // `style.load` rather than `load`: `load` waits for every source to finish,
 // so a basemap host that is slow or firewalled would stop the fog layer from
@@ -363,24 +417,33 @@ map.on('style.load', () => {
     source: 'fog-volume',
     layout: { visibility: 'none' },
     paint: {
-      // Data-driven alpha so thin fog reads as thin rather than as a hard wall.
+      // Density has to live in lightness, not in alpha: MapLibre ignores the
+      // alpha channel of `fill-extrusion-color` entirely (only
+      // `fill-extrusion-opacity` applies), so the rgba() ramp this replaced was
+      // doing nothing at all -- every column was drawn at one flat opacity.
+      // Thin fog is a dim grey that recedes into the hillside; dense fog is
+      // near-white.
       'fill-extrusion-color': [
         'interpolate', ['linear'], ['get', 'f'],
-        0.2, 'rgba(226,234,238,0.30)',
-        0.6, 'rgba(240,245,247,0.62)',
-        1.0, 'rgba(252,253,254,0.88)',
+        0.05, '#b9c6cd',
+        0.35, '#d4dee3',
+        0.7,  '#eaf1f4',
+        1.0,  '#fbfdfe',
       ],
       // Height is measured from the terrain surface, so `top - ground` puts
       // every column's roof at the same absolute altitude: the inversion.
       'fill-extrusion-height': ['get', 'h'],
       'fill-extrusion-base': 0,
-      'fill-extrusion-opacity': 0.9,
+      // The only opacity control this layer has. Low enough that the hillside
+      // reads through the deck, high enough that the deck is still a deck.
+      'fill-extrusion-opacity': 0.62,
       // Off, or MapLibre shades the sides like a building and the marine layer
       // reads as a concrete slab instead of as cloud.
       'fill-extrusion-vertical-gradient': false,
     },
   });
 
+  noiseTexture = buildNoiseTexture();
   styleReady = true;
   applyRenderMode();
   fetchGrid();
@@ -402,8 +465,15 @@ function setStatus(kind, text) {
 }
 
 async function fetchGrid() {
-  if (fetching || !styleReady) return;
+  if (!styleReady) return;
+  // A control moved while a request was in flight used to be dropped outright,
+  // which leaves the map showing the old grid under a spinner that never
+  // resolves into the setting you just chose. At three seconds for the top
+  // resolution that is easy to hit. Coalesce instead: remember that something
+  // changed and re-run once, with whatever the latest settings are.
+  if (fetching) { pendingFetch = true; return; }
   fetching = true;
+  pendingFetch = false;
   el('loading').classList.add('show');
   setStatus('', 'Fetching fog grid…');
   el('err-box').style.display = 'none';
@@ -414,6 +484,7 @@ async function fetchGrid() {
     grid_x: preset.x,
     grid_y: preset.y,
     terrain_routing: state.terrainRouting,
+    edge_feather_m: state.feather,
   };
   if (!state.autoTop) body.fog_top_override_m = state.fogTopOverride;
 
@@ -431,6 +502,7 @@ async function fetchGrid() {
     response = await res.json();
     onGridLoaded(response);
     setStatus('live', 'Live — connected');
+    refreshSources();
   } catch (error) {
     setStatus('err', 'Connection failed');
     const box = el('err-box');
@@ -441,41 +513,259 @@ async function fetchGrid() {
   } finally {
     fetching = false;
     el('loading').classList.remove('show');
+    if (pendingFetch) fetchGrid();
+  }
+}
+
+// `/v1/sources` probes the upstreams directly, so the pill can say whether
+// real observations are arriving rather than only whether the API answered.
+// Deliberately fire-and-forget: it must never block or fail a render.
+let sourcesCheckedAt = 0;
+
+async function refreshSources() {
+  if (Date.now() - sourcesCheckedAt < 60000) return;
+  sourcesCheckedAt = Date.now();
+  try {
+    const res = await fetch(`${state.apiBase}/v1/sources`);
+    if (!res.ok) return;
+    const body = await res.json();
+    const byName = Object.fromEntries(body.sources.map(s => [s.name, s]));
+    const metar = byName.metar;
+    const forecast = byName['open-meteo'];
+    const parts = [];
+    if (forecast && forecast.ok) parts.push('model');
+    if (metar && metar.ok) parts.push(`${metar.sample_count} METARs`);
+    setStatus(
+      body.live ? 'live' : 'err',
+      parts.length ? `Live — ${parts.join(' + ')}` : 'Upstreams degraded'
+    );
+    el('stat-sources').textContent = body.sources
+      .map(s => `${s.name}: ${s.ok ? 'ok' : 'down'}`).join(' · ');
+    el('stat-sources').title = body.sources.map(s => `${s.name} — ${s.detail}`).join('\n');
+  } catch (error) {
+    /* The grid itself already rendered; a failed probe is not worth an error. */
   }
 }
 
 // ---------------------------------------------------------------- rendering
-function fogImageDataUrl(data) {
-  const { grid_x: gx, grid_y: gy, fog_fraction: fog } = data;
-  const canvas = document.createElement('canvas');
-  canvas.width = gx;
-  canvas.height = gy;
-  const context = canvas.getContext('2d');
-  const image = context.createImageData(gx, gy);
+// ---------------------------------------------------------------- fog texture
+// Everything below the "field" line is *rendering*, not model output. The
+// fog_fraction array is a level set: exact, and at the DEM's ~130 m cell size.
+// Painting it straight into pixels gives a flat, evenly opaque sheet with
+// visible cell edges, which reads as a data overlay rather than as weather.
+//
+// Two things fix that, and neither touches the model:
+//   1. the field is resampled with a smooth (Catmull-Rom) kernel, so the fog
+//      line is a curve rather than a staircase of DEM cells;
+//   2. alpha is modulated by a fractal noise field, weighted towards the thin
+//      edges of the deck and away from its core -- which is where real stratus
+//      is ragged and where it is uniform.
+// The Billow toggle turns (2) off when you want to see the level set exactly.
 
-  for (let i = 0; i < gx * gy; i++) {
-    const f = fog[i];
-    // Fog is near-white and slightly cool; density belongs in alpha, not hue.
-    // A colour ramp here would read as a data overlay rather than as weather.
-    const tint = 1 - 0.10 * (1 - f);
-    image.data[i * 4] = Math.round(250 * tint);
-    image.data[i * 4 + 1] = Math.round(252 * tint);
-    image.data[i * 4 + 2] = Math.round(253 * tint);
-    image.data[i * 4 + 3] = Math.round(Math.min(1, f * state.fogOpacity) * 255);
+const NOISE_SIZE = 512;
+const NOISE_OCTAVES = 5;
+let noiseTexture = null;
+
+function hash2(x, y, seed) {
+  let h = Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+
+function fade(t) { return t * t * (3 - 2 * t); }
+
+function valueNoise(u, v, period, seed) {
+  const x = u * period;
+  const y = v * period;
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = fade(x - x0);
+  const fy = fade(y - y0);
+  const wrap = n => ((n % period) + period) % period;
+  const xa = wrap(x0), xb = wrap(x0 + 1);
+  const ya = wrap(y0), yb = wrap(y0 + 1);
+  const n00 = hash2(xa, ya, seed), n10 = hash2(xb, ya, seed);
+  const n01 = hash2(xa, yb, seed), n11 = hash2(xb, yb, seed);
+  return (n00 * (1 - fx) + n10 * fx) * (1 - fy) + (n01 * (1 - fx) + n11 * fx) * fy;
+}
+
+// Built once. Tileable, so it can be sampled at any scale with a wrap.
+function buildNoiseTexture() {
+  const texture = new Float32Array(NOISE_SIZE * NOISE_SIZE);
+  for (let y = 0; y < NOISE_SIZE; y++) {
+    const v = y / NOISE_SIZE;
+    for (let x = 0; x < NOISE_SIZE; x++) {
+      const u = x / NOISE_SIZE;
+      let sum = 0;
+      let amplitude = 0.5;
+      let total = 0;
+      let period = 4;
+      for (let octave = 0; octave < NOISE_OCTAVES; octave++) {
+        sum += amplitude * valueNoise(u, v, period, octave + 1);
+        total += amplitude;
+        amplitude *= 0.5;
+        period *= 2;
+      }
+      texture[y * NOISE_SIZE + x] = sum / total;
+    }
+  }
+  return texture;
+}
+
+function noiseAt(x, y) {
+  const xi = ((x | 0) % NOISE_SIZE + NOISE_SIZE) % NOISE_SIZE;
+  const yi = ((y | 0) % NOISE_SIZE + NOISE_SIZE) % NOISE_SIZE;
+  return noiseTexture[yi * NOISE_SIZE + xi];
+}
+
+// ---------------------------------------------------------------- resampling
+function catmullRom(p0, p1, p2, p3, t) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return 0.5 * (
+    2 * p1 +
+    (p2 - p0) * t +
+    (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+    (3 * p1 - 3 * p2 + p3 - p0) * t3
+  );
+}
+
+/** Separable Catmull-Rom upsample of a row-major grid. */
+function resampleField(source, gx, gy, width, height) {
+  const clampX = i => (i < 0 ? 0 : i > gx - 1 ? gx - 1 : i);
+  const clampY = i => (i < 0 ? 0 : i > gy - 1 ? gy - 1 : i);
+
+  // Pass 1: horizontal, gy rows of `width`.
+  const rows = new Float32Array(gy * width);
+  const scaleX = (gx - 1) / (width - 1);
+  for (let row = 0; row < gy; row++) {
+    const base = row * gx;
+    for (let x = 0; x < width; x++) {
+      const sx = x * scaleX;
+      const x1 = Math.floor(sx);
+      const t = sx - x1;
+      rows[row * width + x] = catmullRom(
+        source[base + clampX(x1 - 1)],
+        source[base + clampX(x1)],
+        source[base + clampX(x1 + 1)],
+        source[base + clampX(x1 + 2)],
+        t
+      );
+    }
+  }
+
+  // Pass 2: vertical.
+  const out = new Float32Array(width * height);
+  const scaleY = (gy - 1) / (height - 1);
+  for (let y = 0; y < height; y++) {
+    const sy = y * scaleY;
+    const y1 = Math.floor(sy);
+    const t = sy - y1;
+    const r0 = clampY(y1 - 1) * width;
+    const r1 = clampY(y1) * width;
+    const r2 = clampY(y1 + 1) * width;
+    const r3 = clampY(y1 + 2) * width;
+    const target = y * width;
+    for (let x = 0; x < width; x++) {
+      // Catmull-Rom overshoots at a hard edge, and a fog fraction is a
+      // fraction: clamp rather than letting the ringing become a halo.
+      const value = catmullRom(rows[r0 + x], rows[r1 + x], rows[r2 + x], rows[r3 + x], t);
+      out[target + x] = value < 0 ? 0 : value > 1 ? 1 : value;
+    }
+  }
+  return out;
+}
+
+// The resampled field is cached: the density and billow sliders repaint from
+// it, and only a new grid pays for the resample.
+let fogField = null;
+
+function prepareFogField(data) {
+  const gx = data.grid_x;
+  const gy = data.grid_y;
+  const detail = state.detail;
+  const width = Math.min(2048, Math.max(gx, Math.round(gx * detail)));
+  const height = Math.min(2048, Math.max(gy, Math.round(gy * detail)));
+  const source = Float32Array.from(data.fog_fraction);
+  fogField = {
+    width,
+    height,
+    values: detail > 1 ? resampleField(source, gx, gy, width, height) : source,
+    canvas: document.createElement('canvas'),
+  };
+  fogField.canvas.width = width;
+  fogField.canvas.height = height;
+}
+
+function fogImageDataUrl() {
+  const { width, height, values, canvas } = fogField;
+  const context = canvas.getContext('2d');
+  const image = context.createImageData(width, height);
+  const pixels = image.data;
+
+  // Two noise scales: a slow one for the shape of the deck, a fast one for the
+  // ragged texture at its edge. Both in *pixel* space, so the billow size is
+  // fixed on the ground rather than growing with the detail setting.
+  const slow = (NOISE_SIZE * 1.6) / width;
+  const fast = (NOISE_SIZE * 5.5) / width;
+  const billow = state.billow;
+  const density = state.fogOpacity;
+
+  for (let y = 0; y < height; y++) {
+    const rowOffset = y * width;
+    const slowY = y * slow;
+    const fastY = y * fast + 211;
+    for (let x = 0; x < width; x++) {
+      const i = rowOffset + x;
+      const f = values[i];
+      let alpha = f;
+
+      if (billow > 0 && f > 0) {
+        const n = 0.68 * noiseAt(x * slow, slowY) + 0.32 * noiseAt(x * fast + 97, fastY);
+        // Strongest where the deck is thin, vanishing in the dense core: real
+        // stratus is uniform in the middle and shredded at the margins.
+        const edge = 4 * f * (1 - f);
+        alpha *= 1 + billow * edge * (n - 0.5) * 2.2;
+      }
+      // A gentle gamma above 1 thins the weak tail without touching the core,
+      // so the deck stops looking like a single flat wash of paint.
+      alpha = Math.pow(alpha < 0 ? 0 : alpha > 1 ? 1 : alpha, 1.25) * density;
+
+      // Near-white, cooling very slightly as the fog thickens. Density belongs
+      // in alpha, not in hue -- a colour ramp would read as a data overlay.
+      const shade = 1 - 0.06 * f;
+      pixels[i * 4] = 252 * shade;
+      pixels[i * 4 + 1] = 253 * shade;
+      pixels[i * 4 + 2] = 255 * shade;
+      pixels[i * 4 + 3] = alpha > 1 ? 255 : alpha * 255;
+    }
   }
   context.putImageData(image, 0, 0);
   return canvas.toDataURL();
 }
 
+function repaintFog() {
+  if (!fogField) return;
+  map.getSource('fog').updateImage({ url: fogImageDataUrl() });
+}
+
 function buildVolume(data) {
   const { grid_x: gx, grid_y: gy, bounds: b, fog_fraction: fog, elevation_m: elev } = data;
   const top = data.slab.top_m;
-  // One polygon per cell would be ~70k features. Coarsen until the count is
-  // something a browser can actually draw at 60fps.
-  const step = Math.max(1, Math.round(Math.sqrt((gx * gy) / 5000)));
+  // One polygon per cell would be ~70k features. Coarsen to a budget the
+  // browser can draw at 60fps -- but a far larger budget than a readable
+  // "grid of boxes" needs, because the blockiness *is* the artefact.
+  const budget = state.volumeBudget;
+  const step = Math.max(1, Math.round(Math.sqrt((gx * gy) / budget)));
   const latSpan = b.lat_max - b.lat_min;
   const lonSpan = b.lon_max - b.lon_min;
   const features = [];
+  // Deliberately low frequency: one billow spans roughly ten blocks. Sampling
+  // it per block instead makes neighbouring columns differ sharply in height,
+  // which exposes thousands of dark vertical side walls and reads as dirt on
+  // the screen rather than as cloud.
+  const noiseScale = NOISE_SIZE / Math.max(gx, gy) / 7;
+  const billow = state.billow;
 
   for (let row = 0; row + step <= gy; row += step) {
     for (let col = 0; col + step <= gx; col += step) {
@@ -485,6 +775,7 @@ function buildVolume(data) {
       // *centroid*, so height has to be measured from roughly that elevation
       // for the roofs to line up at one altitude.
       let maxFog = 0;
+      let sumFog = 0;
       let maxElev = -Infinity;
       let sumElev = 0;
       let count = 0;
@@ -493,16 +784,32 @@ function buildVolume(data) {
           const i = r * gx + c;
           if (fog[i] > maxFog) maxFog = fog[i];
           if (elev[i] > maxElev) maxElev = elev[i];
+          sumFog += fog[i];
           sumElev += elev[i];
           count++;
         }
       }
-      if (maxFog < 0.2) continue;
+      // Low enough to keep the wisps at the edge of the deck, which are most
+      // of what stops a volume render reading as a solid table.
+      if (maxFog < 0.05) continue;
       // A block whose crest reaches the inversion is a ridge poking through the
       // deck, not fog: drop it rather than drawing a column over the top.
       if (maxElev >= top) continue;
-      const height = top - sumElev / count;
-      if (height <= 5) continue;
+
+      const meanFog = sumFog / count;
+      const ceiling = top - sumElev / count;
+      if (ceiling <= 5) continue;
+
+      // The two changes that stop this looking like a car park. First, thin
+      // fog does not reach the inversion, so its column is short -- the deck
+      // now tapers into its edge instead of ending in a wall of full-height
+      // boxes. Second, the roof is displaced by the same fractal field the
+      // drape uses, so the top surface billows instead of being a plane.
+      const lump = billow > 0
+        ? 1 + billow * 0.16 * (noiseAt(col * noiseScale, row * noiseScale) - 0.5) * 2
+        : 1;
+      const height = ceiling * (0.42 + 0.58 * meanFog) * lump;
+      if (height <= 4) continue;
 
       const latNorth = b.lat_max - (row / (gy - 1)) * latSpan;
       const latSouth = b.lat_max - ((row + step) / (gy - 1)) * latSpan;
@@ -529,8 +836,9 @@ function onGridLoaded(data) {
   const b = data.bounds;
   // Row 0 of the response is the NORTH edge, which is exactly the order an
   // image source wants: top-left, top-right, bottom-right, bottom-left.
+  prepareFogField(data);
   map.getSource('fog').updateImage({
-    url: fogImageDataUrl(data),
+    url: fogImageDataUrl(),
     coordinates: [
       [b.lon_min, b.lat_max], [b.lon_max, b.lat_max],
       [b.lon_max, b.lat_min], [b.lon_min, b.lat_min],
@@ -655,13 +963,49 @@ el('grid-res').addEventListener('input', () => {
 });
 el('grid-res').addEventListener('change', fetchGrid);
 
+// The resample is the expensive half and does not depend on these, so the
+// density and billow sliders only repaint -- and only once per frame.
+function scheduleRepaint() {
+  if (repaintHandle) return;
+  repaintHandle = requestAnimationFrame(() => {
+    repaintHandle = 0;
+    repaintFog();
+  });
+}
+
 el('fog-opacity').addEventListener('input', () => {
   state.fogOpacity = parseFloat(el('fog-opacity').value);
   el('fog-opacity-val').textContent = state.fogOpacity.toFixed(2);
-  if (response) {
-    map.getSource('fog').updateImage({ url: fogImageDataUrl(response) });
+  scheduleRepaint();
+});
+
+el('billow').addEventListener('input', () => {
+  state.billow = parseFloat(el('billow').value);
+  el('billow-val').textContent = state.billow === 0
+    ? 'off (level set)' : state.billow.toFixed(2);
+  scheduleRepaint();
+  if (response && state.renderMode !== 'drape') {
+    map.getSource('fog-volume').setData(buildVolume(response));
   }
 });
+
+el('detail').addEventListener('input', () => {
+  state.detail = parseInt(el('detail').value, 10);
+  el('detail-val').textContent = `${state.detail}× (${
+    response ? Math.round(response.grid_x * state.detail) : '—'} px wide)`;
+});
+el('detail').addEventListener('change', () => {
+  if (!response) return;
+  prepareFogField(response);
+  repaintFog();
+  map.getSource('fog-volume').setData(buildVolume(response));
+});
+
+el('feather').addEventListener('input', () => {
+  state.feather = parseInt(el('feather').value, 10);
+  el('feather-val').textContent = `${state.feather} m`;
+});
+el('feather').addEventListener('change', fetchGrid);
 
 el('exaggeration').addEventListener('input', () => {
   state.exaggeration = parseFloat(el('exaggeration').value);

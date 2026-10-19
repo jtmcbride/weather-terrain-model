@@ -273,3 +273,40 @@ def test_mismatched_elevation_shape_is_rejected():
 def test_no_stations_is_an_error():
     with pytest.raises(ValueError, match="at least one station"):
         _build([])
+
+
+def test_a_clear_day_says_why_the_field_is_empty():
+    """An empty field from "no marine air" is a different answer from an empty
+    field from "the ridge blocked it", and the slider looks broken without it."""
+    elevation = peninsula(40, 40)
+    slab = SlabDiagnosis(
+        base_m=0.0,
+        top_m=260.0,
+        inversion_base_m=None,
+        inversion_strength_c=None,
+        lcl_m=900.0,
+        froude_number=None,
+        blocking_regime="unknown",
+        source="fog top overridden by request",
+        warnings=(),
+    )
+    result = build_fog_grid(
+        bounds=PENINSULA_BOUNDS,
+        grid_x=40,
+        grid_y=40,
+        elevation=elevation,
+        stations=[
+            FogStationInput(
+                source="metar",
+                station_id="KSFO",
+                latitude=37.62,
+                longitude=-122.37,
+                elevation=3.0,
+                fog_fraction=0.0,
+            )
+        ],
+        slab=slab,
+    )
+
+    assert float(result.fog_fraction.max()) == 0.0
+    assert any("No observation reports marine air" in w for w in result.warnings)

@@ -101,6 +101,7 @@ def build_fog_grid(
     block_buffer_m: float = 25.0,
     idw_power: float = 2.0,
     max_visibility_m: float = 24000.0,
+    edge_feather_m: float = 30.0,
 ) -> FogGridResult:
     """Interpolate marine influence, then cut it against the terrain.
 
@@ -145,6 +146,17 @@ def build_fog_grid(
     presence = np.array(
         [station.marine_presence(slab.top_m) for station in seeded], dtype=np.float64
     )
+    if float(presence.max()) <= 0.0:
+        # A clear day. The slab may still have thickness -- especially when the
+        # top was overridden -- but nothing is seeding marine air into it, so
+        # the field is empty for a completely different reason than "the fog
+        # was blocked". Saying so is the difference between a working model and
+        # an apparently broken slider.
+        warnings.append(
+            "No observation reports marine air anywhere in the domain, so the "
+            "fog field is empty regardless of the slab. This is the normal "
+            "clear-day answer, not a failure."
+        )
 
     if terrain_routing:
         graph = build_cost_graph(
@@ -191,11 +203,18 @@ def build_fog_grid(
             "fog-free."
         )
 
-    occupancy = slab_occupancy(elevation, slab.base_m, slab.top_m)
+    occupancy = slab_occupancy(
+        elevation, slab.base_m, slab.top_m, feather_m=edge_feather_m
+    )
     fog_fraction = np.clip(marine_influence * occupancy, 0.0, 1.0)
     visibility = visibility_from_fog_fraction(fog_fraction, max_visibility_m)
     states = classify_surface(
-        elevation, fog_fraction, marine_influence, slab.base_m, slab.top_m
+        elevation,
+        fog_fraction,
+        marine_influence,
+        slab.base_m,
+        slab.top_m,
+        feather_m=edge_feather_m,
     )
 
     return FogGridResult(
