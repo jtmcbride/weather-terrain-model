@@ -25,6 +25,17 @@ python -m scripts.fetch_dem --grid 256x280 --zoom 12
 promotes `DeprecationWarning` from `app.*` to an error. `conftest.py` puts
 `backend/` on `sys.path`, so run pytest from `backend/`.
 
+```bash
+# iOS model port (Swift package, runs on the Mac host; no simulator needed)
+cd ios/FogKit && swift test
+# Regenerate its parity fixtures after ANY change to the Python fog model
+cd backend && python -m scripts.export_parity_fixtures
+```
+
+The pinned `scipy==1.15.0` wheel does not load on macOS 27 (dyld rejects a
+`__thread_bss` section). For a host-side venv, `pip install 'scipy>=1.16'` after
+the requirements; the Docker image is unaffected.
+
 The `venv/` at the repo root holds only numpy and rasterio for the root-level
 `download_bay_area_dem.py` scratch script — it is **not** the backend
 environment and has no fastapi or pytest.
@@ -202,6 +213,33 @@ Three render traps worth not rediscovering:
 Terrain tiles in the client come from the same AWS `elevation-tiles-prod`
 Terrarium source as `scripts/fetch_dem.py`, so the surface the model cuts
 against and the surface on screen are the same dataset. Keep it that way.
+
+### iOS (`ios/`)
+
+`ios/Spike` is the throwaway phase-0 Mapbox spike; its README records what
+Mapbox can and cannot do for this renderer. `ios/FogKit` is the fog model ported
+to Swift for an on-device, standalone app: `Slab.swift` ← `features/fog.py`,
+`CostDistance.swift` ← `services/cost_distance.py`, `FogModel.swift` ←
+`services/fog_model.py`. **The Python model is the reference implementation**:
+change it first, then port the change and regenerate the parity fixtures.
+`ParityTests` compare against those fixtures, so they only catch drift once the
+fixtures are regenerated.
+
+FogKit's tests come in two layers, and both matter. The physics tests are ported
+one-for-one from `tests/test_fog*.py` and `tests/test_cost_distance.py` and are
+the specification. `ParityTests` check the *port*: fog fraction and marine
+influence to float32 precision, plus warnings and slab source strings verbatim,
+on synthetic terrain and on the real 160 × 176 SF DEM. A 0.1 % change to the
+edge cost fails them.
+
+Differences from the Python that are deliberate:
+- The cost graph is implicit — Dijkstra computes a cell's 8 edges from the
+  elevation grid as it visits it — instead of a scipy sparse matrix.
+- Stations run in parallel, but IDW accumulates them strictly in station order,
+  because floating-point sums depend on it. Only one distance field per core
+  is ever held, not the `(stations, cells)` matrix.
+- `Grid` takes its size from its own values, so the backend's shape-mismatch
+  error is unrepresentable rather than ported.
 
 ## Testing notes
 
