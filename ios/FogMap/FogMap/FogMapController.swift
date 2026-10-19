@@ -19,6 +19,15 @@ final class FogMapController {
     enum CameraPreset: String, CaseIterable {
         case headlands, twinPeaks, gate, top
 
+        var title: String {
+            switch self {
+            case .headlands: "Headlands"
+            case .twinPeaks: "Twin Peaks"
+            case .gate: "The Gate"
+            case .top: "Overhead"
+            }
+        }
+
         // The web page's VIEWS.
         var options: CameraOptions {
             switch self {
@@ -49,7 +58,7 @@ final class FogMapController {
     private static let volumeSource = "fog-volume"
     private static let stationSource = "stations"
 
-    init(store: FogStore, camera: CameraPreset = .headlands, exaggeration: Double = 1.4) {
+    init(store: FogStore, camera: CameraPreset = .headlands) {
         self.store = store
         mapView = MapView(frame: .zero, mapInitOptions: MapInitOptions(cameraOptions: camera.options, styleURI: nil))
         mapView.ornaments.options.scaleBar.visibility = .hidden
@@ -58,9 +67,11 @@ final class FogMapController {
         store.onVolume = { [weak self] blocks in self?.apply(volume: blocks) }
         store.onStations = { [weak self] stations in self?.apply(stations: stations) }
         store.onRenderMode = { [weak self] mode in self?.apply(mode: mode) }
+        store.onExaggeration = { [weak self] value in self?.setExaggeration(value) }
+        store.onShowStations = { [weak self] visible in self?.apply(stationsVisible: visible) }
 
         mapView.gestures.onMapTap.observe { [weak self] context in
-            self?.store.inspect(latitude: context.coordinate.latitude, longitude: context.coordinate.longitude)
+            self?.handleTap(context)
         }.store(in: &cancelables)
 
         mapView.mapboxMap.loadStyle(.standard) { [weak self] error in
@@ -69,7 +80,29 @@ final class FogMapController {
                 styleError = "\(error)"
                 return
             }
-            installLayers(exaggeration: exaggeration)
+            installLayers()
+        }
+    }
+
+    /// A tap on a station dot selects the station; anywhere else reads the
+    /// grid cell underneath.
+    private func handleTap(_ context: InteractionContext) {
+        let coordinate = context.coordinate
+        guard styleReady, store.showStations else {
+            store.inspect(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            return
+        }
+        let hitArea = CGRect(x: context.point.x - 14, y: context.point.y - 14, width: 28, height: 28)
+        _ = mapView.mapboxMap.queryRenderedFeatures(
+            with: hitArea, options: RenderedQueryOptions(layerIds: ["stations"], filter: nil)
+        ) { [weak self] result in
+            guard let self else { return }
+            if case let .success(hits) = result,
+               case let .string(id)? = hits.first?.queriedFeature.feature.properties?["id"] {
+                store.select(stationID: id)
+            } else {
+                store.inspect(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            }
         }
     }
 
@@ -86,7 +119,7 @@ final class FogMapController {
 
     // MARK: - Layers
 
-    private func installLayers(exaggeration: Double) {
+    private func installLayers() {
         let map = mapView.mapboxMap!
         do {
             try map.setStyleImportConfigProperty(for: "basemap", config: "theme", value: "monochrome")
@@ -161,7 +194,8 @@ final class FogMapController {
             try map.addLayer(dots)
 
             styleReady = true
-            setExaggeration(exaggeration)
+            setExaggeration(store.exaggeration)
+            apply(stationsVisible: store.showStations)
             apply(mode: store.renderMode)
             if let (image, bounds) = pendingDrape { apply(drape: image, bounds: bounds) }
             if let blocks = pendingVolume { apply(volume: blocks) }
@@ -213,6 +247,12 @@ final class FogMapController {
         }
         mapView.mapboxMap.updateGeoJSONSource(
             withId: Self.stationSource, geoJSON: .featureCollection(FeatureCollection(features: features)))
+    }
+
+    private func apply(stationsVisible visible: Bool) {
+        guard styleReady else { return }
+        try? mapView.mapboxMap.setLayerProperty(
+            for: "stations", property: "visibility", value: visible ? "visible" : "none")
     }
 
     private func apply(mode: RenderMode) {

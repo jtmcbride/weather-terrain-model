@@ -46,18 +46,33 @@ final class FogStore {
     var billow = 0.65 { didSet { repaint(drape: true, volume: true) } }
     /// Bitmap pixels per grid cell. Adds smoothness, never information.
     var detail = 3 { didSet { reprepare() } }
+    var exaggeration = 1.4 { didSet { onExaggeration?(exaggeration) } }
+    var showStations = true { didSet { onShowStations?(showStations) } }
+
+    // Timeline playback: one forecast hour per tick. Scrubbing is cheap because
+    // the forecast is cached for the whole window; each hour is a model run.
+    private(set) var isPlaying = false
+    @ObservationIgnored private var playTask: Task<Void, Never>?
+    static let playInterval = Duration.milliseconds(1800)
+    static let lastHour = 167
 
     // Outputs.
     private(set) var report: FogReport?
     private(set) var isLoading = false
     private(set) var failure: String?
     var readout: Readout?
+    /// A tapped METAR station, shown in place of the cell readout.
+    var selectedStation: FogStationInput?
+    private(set) var sources: [SourceStatus] = []
+    private(set) var isCheckingSources = false
 
     // The map controller's hooks.
     @ObservationIgnored var onDrape: ((CGImage, Bounds) -> Void)?
     @ObservationIgnored var onVolume: (([VolumeBlock]) -> Void)?
     @ObservationIgnored var onStations: (([FogStationInput]) -> Void)?
     @ObservationIgnored var onRenderMode: ((RenderMode) -> Void)?
+    @ObservationIgnored var onExaggeration: ((Double) -> Void)?
+    @ObservationIgnored var onShowStations: ((Bool) -> Void)?
 
     @ObservationIgnored private let pipeline = FogPipeline()
     @ObservationIgnored private var elevations: [GridPreset: Grid<Double>] = [:]
@@ -91,6 +106,9 @@ final class FogStore {
             self.report = report
             failure = nil
             readout = nil
+            if let id = selectedStation?.stationID {
+                selectedStation = report.grid.usedStations.first { $0.stationID == id }
+            }
             onStations?(report.grid.usedStations.filter { $0.source == "metar" })
             await prepareAndPaint(report)
         } catch {
@@ -147,8 +165,71 @@ final class FogStore {
         }
     }
 
+    // MARK: - Timeline
+
+    func togglePlay() {
+        if isPlaying { stopPlaying() } else { startPlaying() }
+    }
+
+    private func startPlaying() {
+        isPlaying = true
+        playTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.playInterval)
+                guard let self, !Task.isCancelled else { return }
+                hourIndex = hourIndex >= Self.lastHour ? 0 : hourIndex + 1
+            }
+        }
+    }
+
+    func stopPlaying() {
+        isPlaying = false
+        playTask?.cancel()
+        playTask = nil
+    }
+
+    /// The local wall-clock time of a forecast hour. Index 0 is 00:00 UTC on
+    /// the day the window was requested.
+    func date(forHour hour: Int) -> Date {
+        if let time = report?.time, let reported = Self.utcFormatter.date(from: time) {
+            return reported.addingTimeInterval(Double(hour - hourIndex) * 3600)
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar.startOfDay(for: Date()).addingTimeInterval(Double(hour) * 3600)
+    }
+
+    private static let utcFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        return formatter
+    }()
+
+    // MARK: - Sources
+
+    /// Probe both upstreams: is real data arriving, how old is it, which
+    /// fallback is in play. A dead upstream is a status, never an error.
+    func checkSources() {
+        guard !isCheckingSources else { return }
+        isCheckingSources = true
+        Task {
+            sources = await pipeline.sourceStatus()
+            isCheckingSources = false
+        }
+    }
+
+    // MARK: - Inspection
+
+    func select(stationID: String) {
+        selectedStation = report?.grid.usedStations.first { $0.stationID == stationID }
+        readout = nil
+    }
+
     /// The grid cell under a tapped coordinate, read straight from the report.
     func inspect(latitude: Double, longitude: Double) {
+        selectedStation = nil
         guard let grid = report?.grid, let bounds = report?.bounds else { return }
         let geometry = RasterGeometry(bounds: bounds, gridX: grid.fogFraction.width, gridY: grid.fogFraction.height)
         guard let cell = geometry.cellIndex(latitude: latitude, longitude: longitude) else {

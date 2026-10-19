@@ -258,6 +258,18 @@ gitignored `ios/Secrets.xcconfig`. The basemap is Standard (monochrome, dusk):
 fog layers live in the `middle` slot (below labels) and must stay emissive, and
 `setLights` must not be called, because it replaces Standard's light preset.
 
+The app is a full-screen map under a persistent sheet (`ControlSheet.swift`):
+collapsed it is the timeline, medium adds the controls, large adds the slab
+readout, warnings and live sources. Launch arguments (listed on `ContentView`)
+set camera, mode, fog top, grid, hour and sheet state for unattended
+`simctl` screenshots.
+
+**Open-Meteo rate limits bite during development.** It weights a request by
+locations × variables, so one fog fetch (25 points, 19 variables) counts as
+~50 calls against a per-minute limit, and every cold app launch refetches
+because the cache is in memory. A dozen quick relaunches earns a 429. The
+sources probe is therefore on demand, never at launch.
+
 `hourIndex` 0 is **00:00 UTC today**, not now — forecasts are requested with
 `timezone=UTC`, so the window starts at midnight. Use `currentHourIndex()`. The
 backend and web page have the same semantics.
