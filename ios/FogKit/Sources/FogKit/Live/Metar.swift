@@ -32,7 +32,7 @@ let ceilingCovers: Set<String> = ["BKN", "OVC", "OVX", "VV"]
 let denseFogPresentWeather = try! NSRegularExpression(
     pattern: #"\b(?:[-+]?(?:MI|BC|PR|FZ)?FG)\b"#)
 
-public struct MetarObservation: Sendable, Equatable {
+public struct MetarObservation: Sendable, Equatable, Codable {
     public var stationID: String
     public var latitude: Double
     public var longitude: Double
@@ -50,13 +50,15 @@ public struct MetarObservation: Sendable, Equatable {
     public var lowCloudFraction: Double?
     public var reportsFog: Bool
     public var raw: String
+    /// When this was fetched from the AWC; nil for an observation built in code.
+    public var fetchedAt: Date?
 
     public init(
         stationID: String, latitude: Double, longitude: Double, elevationM: Double,
         observedAt: String = "", temperatureC: Double? = nil, dewPointC: Double? = nil,
         visibilityM: Double? = nil, windSpeedMs: Double? = nil, windDirectionDeg: Double? = nil,
         ceilingM: Double? = nil, lowestCloudBaseM: Double? = nil, lowCloudFraction: Double? = nil,
-        reportsFog: Bool = false, raw: String = ""
+        reportsFog: Bool = false, raw: String = "", fetchedAt: Date? = nil
     ) {
         self.stationID = stationID
         self.latitude = latitude
@@ -73,6 +75,7 @@ public struct MetarObservation: Sendable, Equatable {
         self.lowCloudFraction = lowCloudFraction
         self.reportsFog = reportsFog
         self.raw = raw
+        self.fetchedAt = fetchedAt
     }
 
     public var dewPointDepressionC: Double? {
@@ -159,10 +162,10 @@ private func nonEmpty(_ value: Any?) -> String? {
 
 /// Where surface observations come from. `MetarClient` in the app.
 public protocol ObservationSource: Sendable {
-    func observations(stationIDs: [String], maxAgeMinutes: Int) async throws -> [MetarObservation]
+    func observations(stationIDs: [String], maxAgeMinutes: Int, policy: FetchPolicy) async throws -> [MetarObservation]
 }
 
-private struct MetarKey: Hashable, Sendable {
+private struct MetarKey: Hashable, Sendable, Codable {
     var stationIDs: [String]
     var maxAgeMinutes: Int
 }
@@ -174,11 +177,17 @@ public final class MetarClient: ObservationSource {
     // slider moves buys nothing and risks being throttled out of the one
     // genuinely observed input the model has.
     private let cache: TtlCache<MetarKey, [MetarObservation]>
+    private let now: @Sendable () -> Date
 
-    public init(fetcher: HTTPFetching = URLSessionFetcher(), url: URL = metarURL, cacheTTLSeconds: TimeInterval = 300) {
+    /// With `disk`, observations persist across launches (see `DiskCache`).
+    public init(
+        fetcher: HTTPFetching = URLSessionFetcher(), url: URL = metarURL, cacheTTLSeconds: TimeInterval = 300,
+        disk: DiskCache? = nil, now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.fetcher = fetcher
         self.url = url
-        cache = TtlCache(ttlSeconds: cacheTTLSeconds, maxEntries: 4)
+        self.now = now
+        cache = TtlCache(ttlSeconds: cacheTTLSeconds, maxEntries: 4, persistence: disk.map { .disk($0) })
     }
 
     public func cacheStats() async -> CacheStats { await cache.stats() }
@@ -188,16 +197,19 @@ public final class MetarClient: ObservationSource {
         await cache.ageSeconds(MetarKey(stationIDs: stationIDs, maxAgeMinutes: maxAgeMinutes))
     }
 
-    public func observations(stationIDs: [String], maxAgeMinutes: Int = 90) async throws -> [MetarObservation] {
+    public func observations(
+        stationIDs: [String], maxAgeMinutes: Int = 90, policy: FetchPolicy = .normal
+    ) async throws -> [MetarObservation] {
         guard !stationIDs.isEmpty else { return [] }
-        let fetcher = self.fetcher, url = self.url
-        return try await cache.value(for: MetarKey(stationIDs: stationIDs, maxAgeMinutes: maxAgeMinutes)) {
-            try await Self.fetch(fetcher, url, stationIDs: stationIDs, maxAgeMinutes: maxAgeMinutes)
+        let fetcher = self.fetcher, url = self.url, now = self.now
+        let key = MetarKey(stationIDs: stationIDs, maxAgeMinutes: maxAgeMinutes)
+        return try await cache.value(for: key, policy: policy) {
+            try await Self.fetch(fetcher, url, stationIDs: stationIDs, maxAgeMinutes: maxAgeMinutes, fetchedAt: now())
         }
     }
 
     private static func fetch(
-        _ fetcher: HTTPFetching, _ url: URL, stationIDs: [String], maxAgeMinutes: Int
+        _ fetcher: HTTPFetching, _ url: URL, stationIDs: [String], maxAgeMinutes: Int, fetchedAt: Date
     ) async throws -> [MetarObservation] {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         let hours = max(1, Int((Double(maxAgeMinutes) / 60).rounded(.toNearestOrEven)))
@@ -212,7 +224,8 @@ public final class MetarClient: ObservationSource {
         // per station, in first-seen station order.
         var order: [String] = []
         var latest: [String: MetarObservation] = [:]
-        for observation in parseMetarPayload(payload) {
+        for var observation in parseMetarPayload(payload) {
+            observation.fetchedAt = fetchedAt
             guard let existing = latest[observation.stationID] else {
                 order.append(observation.stationID)
                 latest[observation.stationID] = observation

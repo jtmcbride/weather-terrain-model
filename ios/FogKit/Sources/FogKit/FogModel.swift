@@ -60,6 +60,10 @@ public struct FogConfig: Sendable, Equatable {
     public var fogDewPointDepressionC = 2.5
     public var edgeFeatherM = 30.0
     public var defaultFogTopM = 300.0
+    /// `config.forecast_cache_ttl_seconds` / `metar_cache_ttl_seconds`. Data
+    /// older than these was served stale, and the pipeline says so.
+    public var forecastCacheTTLSeconds = 900.0
+    public var metarCacheTTLSeconds = 300.0
 
     public init() {}
 }

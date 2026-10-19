@@ -33,7 +33,7 @@ private struct StubForecasts: ForecastSource {
 
     func forecastPoints(
         _ coordinates: [(latitude: Double, longitude: Double)], hourIndex: Int,
-        includeOptional: Bool, includeLevels: Bool
+        includeOptional: Bool, includeLevels: Bool, policy: FetchPolicy
     ) async throws -> [ForecastPoint] {
         if fail { throw UpstreamDown() }
         var points = coordinates.map { forecastPoint($0.latitude, $0.longitude, dropVisibility: dropVisibility) }
@@ -52,7 +52,7 @@ private struct StubMetars: ObservationSource {
     /// Replace KSFO with a clear station on a 150 m hill.
     var clearHillStation = false
 
-    func observations(stationIDs: [String], maxAgeMinutes: Int) async throws -> [MetarObservation] {
+    func observations(stationIDs: [String], maxAgeMinutes: Int, policy: FetchPolicy) async throws -> [MetarObservation] {
         if fail { throw UpstreamDown() }
         if clearHillStation {
             return [

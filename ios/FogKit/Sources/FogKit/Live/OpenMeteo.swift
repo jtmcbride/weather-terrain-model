@@ -34,10 +34,14 @@ public struct ForecastPoint: Sendable, Equatable {
     public var levels: [PressureLevel]
     /// Requested variables the upstream did not provide, by name.
     public var missing: [String]
+    /// When the payload this came from was fetched, which is older than the
+    /// cache TTL only if a refresh failed or the lookup was cache-only.
+    public var fetchedAt: Date
 
     public init(
         latitude: Double, longitude: Double, elevation: Double, time: String,
-        values: [String: Double], levels: [PressureLevel] = [], missing: [String] = []
+        values: [String: Double], levels: [PressureLevel] = [], missing: [String] = [],
+        fetchedAt: Date = Date()
     ) {
         self.latitude = latitude
         self.longitude = longitude
@@ -46,6 +50,7 @@ public struct ForecastPoint: Sendable, Equatable {
         self.values = values
         self.levels = levels
         self.missing = missing
+        self.fetchedAt = fetchedAt
     }
 }
 
@@ -53,20 +58,21 @@ public struct ForecastPoint: Sendable, Equatable {
 public protocol ForecastSource: Sendable {
     func forecastPoints(
         _ coordinates: [(latitude: Double, longitude: Double)], hourIndex: Int,
-        includeOptional: Bool, includeLevels: Bool
+        includeOptional: Bool, includeLevels: Bool, policy: FetchPolicy
     ) async throws -> [ForecastPoint]
 }
 
 /// The whole hourly series for one point, as the upstream returned it.
-struct HourlyLocation: Sendable {
+struct HourlyLocation: Sendable, Codable {
     var latitude: Double
     var longitude: Double
     var elevation: Double
     var times: [String]
     var series: [String: [Double?]]
+    var fetchedAt: Date
 }
 
-private struct CacheKey: Hashable, Sendable {
+private struct CacheKey: Hashable, Sendable, Codable {
     var coordinates: [String]
     var variables: [String]
 }
@@ -76,10 +82,16 @@ public final class OpenMeteoClient: ForecastSource {
     // Keyed by (coordinates, variables) and *not* by hour: one payload covers
     // the whole forecast window, so a timeline drag is one request, not 168.
     private let cache: TtlCache<CacheKey, [HourlyLocation]>
+    private let now: @Sendable () -> Date
 
-    public init(fetcher: HTTPFetching = URLSessionFetcher(), cacheTTLSeconds: TimeInterval = 900) {
+    /// With `disk`, payloads persist across launches (see `DiskCache`).
+    public init(
+        fetcher: HTTPFetching = URLSessionFetcher(), cacheTTLSeconds: TimeInterval = 900,
+        disk: DiskCache? = nil, now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.fetcher = fetcher
-        cache = TtlCache(ttlSeconds: cacheTTLSeconds, maxEntries: 4)
+        self.now = now
+        cache = TtlCache(ttlSeconds: cacheTTLSeconds, maxEntries: 4, persistence: disk.map { .disk($0) })
     }
 
     public func cacheStats() async -> CacheStats { await cache.stats() }
@@ -91,7 +103,7 @@ public final class OpenMeteoClient: ForecastSource {
     /// names are reported on each point's `missing`.
     public func forecastPoints(
         _ coordinates: [(latitude: Double, longitude: Double)], hourIndex: Int,
-        includeOptional: Bool = false, includeLevels: Bool = false
+        includeOptional: Bool = false, includeLevels: Bool = false, policy: FetchPolicy = .normal
     ) async throws -> [ForecastPoint] {
         guard !coordinates.isEmpty else { return [] }
         var variables = coreSurfaceVariables
@@ -101,13 +113,19 @@ public final class OpenMeteoClient: ForecastSource {
         let batches = stride(from: 0, to: coordinates.count, by: forecastBatchSize).map {
             Array(coordinates[$0..<min($0 + forecastBatchSize, coordinates.count)])
         }
+        let windowStart = Self.startOfDayUTC(now())
         do {
-            return try await fetchAll(batches, hourIndex: hourIndex, variables: variables, wantLevels: includeLevels)
-        } catch let error as HTTPStatusError where error.statusCode == 400 && variables != coreSurfaceVariables {
-            // A variable this model does not publish. Retry with what every
-            // model carries.
+            return try await fetchAll(
+                batches, hourIndex: hourIndex, windowStart: windowStart, variables: variables,
+                wantLevels: includeLevels, policy: policy)
+        } catch let error where variables != coreSurfaceVariables && Self.optionalSetRejected(error) {
+            // A variable this model does not publish -- or, cache-only, a model
+            // whose last fetch already fell back. Retry with what every model
+            // carries.
             let dropped = variables.filter { !coreSurfaceVariables.contains($0) }
-            let points = try await fetchAll(batches, hourIndex: hourIndex, variables: coreSurfaceVariables, wantLevels: false)
+            let points = try await fetchAll(
+                batches, hourIndex: hourIndex, windowStart: windowStart, variables: coreSurfaceVariables,
+                wantLevels: false, policy: policy)
             return points.map { point in
                 var point = point
                 point.missing += dropped
@@ -116,37 +134,48 @@ public final class OpenMeteoClient: ForecastSource {
         }
     }
 
+    private static func optionalSetRejected(_ error: Error) -> Bool {
+        if let status = error as? HTTPStatusError { return status.statusCode == 400 }
+        return error is CacheMiss
+    }
+
     private func fetchAll(
-        _ batches: [[(latitude: Double, longitude: Double)]], hourIndex: Int,
-        variables: [String], wantLevels: Bool
+        _ batches: [[(latitude: Double, longitude: Double)]], hourIndex: Int, windowStart: Date,
+        variables: [String], wantLevels: Bool, policy: FetchPolicy
     ) async throws -> [ForecastPoint] {
         try await withThrowingTaskGroup(of: (Int, [HourlyLocation]).self) { group in
             for (index, batch) in batches.enumerated() {
                 let coordinates = batch.map { [$0.latitude, $0.longitude] }
-                group.addTask { (index, try await self.locations(coordinates, variables: variables)) }
+                group.addTask {
+                    (index, try await self.locations(coordinates, variables: variables, policy: policy))
+                }
             }
             var byBatch = [[HourlyLocation]](repeating: [], count: batches.count)
             for try await (index, locations) in group { byBatch[index] = locations }
             return try byBatch.joined().map {
-                try Self.parse($0, hourIndex: hourIndex, requested: variables, wantLevels: wantLevels)
+                try Self.parse(
+                    $0, hourIndex: hourIndex, windowStart: windowStart, requested: variables,
+                    wantLevels: wantLevels)
             }
         }
     }
 
-    private func locations(_ coordinates: [[Double]], variables: [String]) async throws -> [HourlyLocation] {
+    private func locations(
+        _ coordinates: [[Double]], variables: [String], policy: FetchPolicy
+    ) async throws -> [HourlyLocation] {
         let key = CacheKey(
             coordinates: coordinates.map { "\(coordinateString($0[0])),\(coordinateString($0[1]))" },
             variables: variables)
-        let fetcher = self.fetcher
-        return try await cache.value(for: key) {
-            try await Self.fetchLocations(fetcher, coordinates, variables: variables)
+        let fetcher = self.fetcher, now = self.now
+        return try await cache.value(for: key, policy: policy) {
+            try await Self.fetchLocations(fetcher, coordinates, variables: variables, fetchedAt: now())
         }
     }
 
     /// The raw hourly series for one batch. Deliberately not parameterised by
     /// hour: every hour the app can scrub to is already in this payload.
     private static func fetchLocations(
-        _ fetcher: HTTPFetching, _ coordinates: [[Double]], variables: [String]
+        _ fetcher: HTTPFetching, _ coordinates: [[Double]], variables: [String], fetchedAt: Date
     ) async throws -> [HourlyLocation] {
         var components = URLComponents(url: forecastURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [
@@ -170,15 +199,47 @@ public final class OpenMeteoClient: ForecastSource {
                 longitude: jsonDouble(record["longitude"]) ?? 0,
                 elevation: jsonDouble(record["elevation"]) ?? 0,
                 times: (hourly["time"] as? [Any])?.map { "\($0)" } ?? [],
-                series: series)
+                series: series,
+                fetchedAt: fetchedAt)
         }
     }
 
+    /// 00:00 UTC on `date`'s UTC day: where a `timezone=UTC` window starts.
+    static func startOfDayUTC(_ date: Date) -> Date {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar.startOfDay(for: date)
+    }
+
+    static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        return formatter
+    }()
+
+    /// The series index for `hourIndex`, chosen by valid time.
+    ///
+    /// `hourIndex` counts hours from 00:00 UTC today. A fresh payload starts
+    /// there, so this is just `hourIndex` -- the backend's behaviour. A payload
+    /// from the disk cache may start on an earlier day, and indexing it by
+    /// position would silently show a forecast a day or more away from the
+    /// hour asked for. Past either end of the window, the nearest hour is used.
+    static func seriesIndex(for hourIndex: Int, windowStart: Date, times: [String]) -> Int {
+        guard let first = times.first.flatMap(timeFormatter.date(from:)) else {
+            return min(hourIndex, times.count - 1)
+        }
+        let target = windowStart.addingTimeInterval(Double(hourIndex) * 3600)
+        let offset = Int((target.timeIntervalSince(first) / 3600).rounded())
+        return min(max(offset, 0), times.count - 1)
+    }
+
     static func parse(
-        _ location: HourlyLocation, hourIndex: Int, requested: [String], wantLevels: Bool
+        _ location: HourlyLocation, hourIndex: Int, windowStart: Date, requested: [String], wantLevels: Bool
     ) throws -> ForecastPoint {
         guard !location.times.isEmpty else { throw ForecastParseError.noHourlySeries }
-        let index = min(hourIndex, location.times.count - 1)
+        let index = seriesIndex(for: hourIndex, windowStart: windowStart, times: location.times)
         func value(_ name: String) -> Double? {
             guard let series = location.series[name], index < series.count else { return nil }
             return series[index]
@@ -202,7 +263,8 @@ public final class OpenMeteoClient: ForecastSource {
 
         return ForecastPoint(
             latitude: location.latitude, longitude: location.longitude, elevation: location.elevation,
-            time: location.times[index], values: values, levels: levels, missing: missing)
+            time: location.times[index], values: values, levels: levels, missing: missing,
+            fetchedAt: location.fetchedAt)
     }
 }
 

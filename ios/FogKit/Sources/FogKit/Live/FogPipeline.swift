@@ -65,17 +65,24 @@ public final class FogPipeline: Sendable {
     public let metarStationIDs: [String]
     public let metarMaxAgeMinutes: Int
     public let useMetarObservations: Bool
+    private let now: @Sendable () -> Date
 
+    /// The default sources talk to the live upstreams and persist to
+    /// `Library/Caches/FogKit`, so the app can open on its last forecast.
     public init(
-        forecasts: ForecastSource = OpenMeteoClient(),
-        observations: ObservationSource = MetarClient(),
+        forecasts: ForecastSource? = nil,
+        observations: ObservationSource? = nil,
         config: FogConfig = FogConfig(),
         metarStationIDs: [String] = bayAreaMetarStations,
         metarMaxAgeMinutes: Int = 90,
-        useMetarObservations: Bool = true
+        useMetarObservations: Bool = true,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
-        self.forecasts = forecasts
-        self.observations = observations
+        self.forecasts = forecasts ?? OpenMeteoClient(
+            cacheTTLSeconds: config.forecastCacheTTLSeconds, disk: .caches("open-meteo"))
+        self.observations = observations ?? MetarClient(
+            cacheTTLSeconds: config.metarCacheTTLSeconds, disk: .caches("metar"))
+        self.now = now
         self.config = config
         self.metarStationIDs = metarStationIDs
         self.metarMaxAgeMinutes = metarMaxAgeMinutes
@@ -83,8 +90,12 @@ public final class FogPipeline: Sendable {
     }
 
     /// Diagnose the marine layer and render it against `elevation`, which
-    /// must cover `config.bounds` north-first.
-    public func run(_ request: FogRequest, elevation: Grid<Double>) async throws -> FogReport {
+    /// must cover `config.bounds` north-first. `.cacheOnly` never touches the
+    /// network: it draws whatever was last fetched, for the instant the app
+    /// opens, and throws if nothing has been.
+    public func run(
+        _ request: FogRequest, elevation: Grid<Double>, policy: FetchPolicy = .normal
+    ) async throws -> FogReport {
         let bounds = config.bounds
         var warnings: [String] = []
         let clock = ContinuousClock()
@@ -96,7 +107,7 @@ public final class FogPipeline: Sendable {
         do {
             forecastPoints = try await forecasts.forecastPoints(
                 stationLattice(bounds, columns: 5, rows: 5), hourIndex: request.hourIndex,
-                includeOptional: true, includeLevels: true)
+                includeOptional: true, includeLevels: true, policy: policy)
         } catch {
             throw FogPipelineError.forecastUnavailable("\(error)")
         }
@@ -114,6 +125,12 @@ public final class FogPipeline: Sendable {
                 "No pressure-level temperatures were returned, so the inversion "
                 + "could not be located directly.")
         }
+        if let fetched = forecastPoints.map(\.fetchedAt).min(),
+           now().timeIntervalSince(fetched) > config.forecastCacheTTLSeconds {
+            warnings.append(
+                "Showing a forecast fetched \(Self.describeAge(now().timeIntervalSince(fetched))) ago: "
+                + "a fresh one could not be fetched from Open-Meteo.")
+        }
 
         var stations = forecastPoints.map(forecastFogStation)
         var metarCeilings: [Double] = []
@@ -121,7 +138,13 @@ public final class FogPipeline: Sendable {
             var metars: [MetarObservation] = []
             do {
                 metars = try await observations.observations(
-                    stationIDs: metarStationIDs, maxAgeMinutes: metarMaxAgeMinutes)
+                    stationIDs: metarStationIDs, maxAgeMinutes: metarMaxAgeMinutes, policy: policy)
+                if let fetched = metars.compactMap(\.fetchedAt).min(),
+                   now().timeIntervalSince(fetched) > config.metarCacheTTLSeconds {
+                    warnings.append(
+                        "METAR observations were fetched \(Self.describeAge(now().timeIntervalSince(fetched))) "
+                        + "ago: fresh ones could not be fetched from the Aviation Weather Center.")
+                }
             } catch {
                 warnings.append(
                     "Live METAR observations were unavailable (\(error)); the grid is "
@@ -222,7 +245,7 @@ public final class FogPipeline: Sendable {
         do {
             let points = try await forecasts.forecastPoints(
                 stationLattice(config.bounds, columns: 2, rows: 2), hourIndex: 0,
-                includeOptional: true, includeLevels: true)
+                includeOptional: true, includeLevels: true, policy: .normal)
             let missing = Array(Set(points.flatMap(\.missing))).sorted()
             let levels = points.reduce(0) { $0 + $1.levels.count }
             return SourceStatus(
@@ -243,7 +266,7 @@ public final class FogPipeline: Sendable {
         let started = clock.now
         do {
             let metars = try await observations.observations(
-                stationIDs: metarStationIDs, maxAgeMinutes: metarMaxAgeMinutes)
+                stationIDs: metarStationIDs, maxAgeMinutes: metarMaxAgeMinutes, policy: .normal)
             let reporting = metars.map(\.stationID).sorted()
             let silent = Set(metarStationIDs).subtracting(reporting).sorted()
             return SourceStatus(
@@ -254,6 +277,15 @@ public final class FogPipeline: Sendable {
         } catch {
             return SourceStatus(name: "metar", ok: false, detail: "\(error)")
         }
+    }
+
+    /// "40 min", "3 h 05 min", "2 days".
+    static func describeAge(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite else { return "an unknown time" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes) min" }
+        if minutes < 48 * 60 { return String(format: "%d h %02d min", minutes / 60, minutes % 60) }
+        return "\(minutes / (24 * 60)) days"
     }
 
     private func seconds(_ duration: Duration) -> Double {

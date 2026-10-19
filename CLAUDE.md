@@ -266,9 +266,18 @@ set camera, mode, fog top, grid, hour and sheet state for unattended
 
 **Open-Meteo rate limits bite during development.** It weights a request by
 locations × variables, so one fog fetch (25 points, 19 variables) counts as
-~50 calls against a per-minute limit, and every cold app launch refetches
-because the cache is in memory. A dozen quick relaunches earns a 429. The
-sources probe is therefore on demand, never at launch.
+~50 calls against a per-minute limit. A dozen quick relaunches earns a 429.
+The sources probe is therefore on demand, never at launch, and `-offline YES`
+runs the app entirely from the disk cache.
+
+Both upstream caches persist to `Library/Caches/FogKit` (`DiskCache`): a miss
+in memory loads the file, backdated by its wall-clock age, so the TTL and
+stale-on-error behave exactly as in memory but across launches. The app draws
+the cached forecast with `FetchPolicy.cacheOnly` the moment it opens, then
+refreshes. Anything served older than its TTL is named in `warnings`
+("Showing a forecast fetched 3 h 05 min ago…"). Because a cached payload can
+start on an earlier day, `OpenMeteoClient` picks the hour by **valid time**,
+not position; for a fresh payload the two are identical.
 
 `hourIndex` 0 is **00:00 UTC today**, not now — forecasts are requested with
 `timezone=UTC`, so the window starts at midnight. Use `currentHourIndex()`. The

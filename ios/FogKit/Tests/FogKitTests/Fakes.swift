@@ -49,3 +49,14 @@ extension URL {
 struct UpstreamDown: Error, CustomStringConvertible {
     var description: String { "upstream down" }
 }
+
+/// A fixed "now" for clients whose hour selection depends on the date:
+/// 03:20 UTC, so `hourIndex` 0 is 00:00 UTC that day.
+let testNow = ISO8601DateFormatter().date(from: "2026-09-05T03:20:00Z")!
+let windowStart = ISO8601DateFormatter().date(from: "2026-09-05T00:00:00Z")!
+
+/// A fresh, empty directory for one test's disk cache.
+func temporaryCacheDirectory() -> URL {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("FogKitTests-\(UUID().uuidString)", isDirectory: true)
+}

@@ -14,7 +14,8 @@ struct FogMapApp: App {
 ///
 /// Launch arguments set initial state for unattended screenshots:
 /// `-camera headlands|twinPeaks|gate|top -mode drape|volume|both -fogTop M
-/// -billow X -grid 0-4 -hour N -sheet peek|medium|large -hideControls YES`.
+/// -billow X -grid 0-4 -hour N -sheet peek|medium|large -hideControls YES
+/// -offline YES`.
 struct ContentView: View {
     @State private var store: FogStore
     @State private var map: FogMapController
@@ -33,6 +34,7 @@ struct ContentView: View {
         if args.object(forKey: "grid") != nil,
            let preset = GridPreset(rawValue: args.integer(forKey: "grid")) { store.gridPreset = preset }
         if args.object(forKey: "hour") != nil { store.hourIndex = args.integer(forKey: "hour") }
+        store.offline = args.bool(forKey: "offline")
         let camera = args.string(forKey: "camera").flatMap(FogMapController.CameraPreset.init) ?? .headlands
         _store = State(initialValue: store)
         _map = State(initialValue: FogMapController(store: store, camera: camera))
@@ -46,7 +48,7 @@ struct ContentView: View {
         // Sources are probed on demand, not at launch: the probe is its own
         // upstream request, and Open-Meteo weights a multi-variable call as
         // dozens against a per-minute limit.
-        store.refresh()
+        store.start()
     }
 
     var body: some View {

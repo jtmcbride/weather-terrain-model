@@ -97,7 +97,7 @@ import Testing
         }
         return (200, locations)
     }
-    let client = OpenMeteoClient(fetcher: fetcher)
+    let client = OpenMeteoClient(fetcher: fetcher, now: { testNow })
     let coordinates = (0..<120).map { (latitude: 37.0 + Double($0) * 0.001, longitude: -122.4) }
     let points = try await client.forecastPoints(coordinates, hourIndex: 0)
 
@@ -117,7 +117,7 @@ import Testing
         if url.query("hourly")!.contains("visibility") { return (400, ["reason": "unknown variable"]) }
         return (200, hourlyPayload())
     }
-    let client = OpenMeteoClient(fetcher: fetcher)
+    let client = OpenMeteoClient(fetcher: fetcher, now: { testNow })
     let points = try await client.forecastPoints([(37.7, -122.4)], hourIndex: 0, includeOptional: true, includeLevels: true)
 
     #expect(fetcher.requestCount == 2)
@@ -129,7 +129,7 @@ import Testing
 @Test func otherHTTPErrorsAreNotRetried() async {
     let fetcher = FakeFetcher { _ in (429, ["reason": "Too many requests"]) }
     await #expect(throws: HTTPStatusError.self) {
-        try await OpenMeteoClient(fetcher: fetcher).forecastPoints([(37.7, -122.4)], hourIndex: 0, includeOptional: true)
+        try await OpenMeteoClient(fetcher: fetcher, now: { testNow }).forecastPoints([(37.7, -122.4)], hourIndex: 0, includeOptional: true)
     }
     #expect(fetcher.requestCount == 1)
 }
@@ -140,7 +140,7 @@ import Testing
         "temperature_950hPa": [12.4, 12.4, 12.4], "geopotential_height_950hPa": [300.0, 300.0, 300.0],
         "temperature_1000hPa": [13.0, 13.0, 13.0], "geopotential_height_1000hPa": [110.0, 110.0, 110.0],
     ])
-    let client = OpenMeteoClient(fetcher: FakeFetcher { _ in (200, payload) })
+    let client = OpenMeteoClient(fetcher: FakeFetcher { _ in (200, payload) }, now: { testNow })
     let first = try await client.forecastPoints([(37.7, -122.4)], hourIndex: 0, includeOptional: true, includeLevels: true)[0]
     let second = try await client.forecastPoints([(37.7, -122.4)], hourIndex: 1, includeOptional: true, includeLevels: true)[0]
 

@@ -75,10 +75,26 @@ final class FogStore {
     @ObservationIgnored var onShowStations: ((Bool) -> Void)?
 
     @ObservationIgnored private let pipeline = FogPipeline()
+    /// Never touch the network: draw only what the disk cache holds. For
+    /// development, where a dozen relaunches would otherwise spend Open-Meteo's
+    /// per-minute limit (`-offline YES`).
+    @ObservationIgnored var offline = false
     @ObservationIgnored private var elevations: [GridPreset: Grid<Double>] = [:]
     @ObservationIgnored private var field: FogField?
     @ObservationIgnored private var runTask: Task<Void, Never>?
     @ObservationIgnored private var paintTask: Task<Void, Never>?
+
+    /// First draw: the last cached forecast immediately, with no network,
+    /// then a normal run that refreshes it. On a cold start with nothing
+    /// cached, the first step simply finds nothing and the second does the work.
+    func start() {
+        runTask?.cancel()
+        runTask = Task { [weak self] in
+            await self?.run(policy: .cacheOnly)
+            guard !Task.isCancelled else { return }
+            await self?.run(policy: .normal)
+        }
+    }
 
     /// Re-run the model, debounced: a slider drag produces one run when it
     /// settles, not one per tick.
@@ -91,9 +107,10 @@ final class FogStore {
         }
     }
 
-    private func run() async {
+    private func run(policy requested: FetchPolicy = .normal) async {
+        let policy = offline ? .cacheOnly : requested
         isLoading = true
-        defer { if !Task.isCancelled { isLoading = false } }
+        defer { if !Task.isCancelled && requested == .normal { isLoading = false } }
         do {
             let elevation = try loadElevation(gridPreset)
             var request = FogRequest()
@@ -101,7 +118,7 @@ final class FogStore {
             request.terrainRouting = terrainRouting
             request.fogTopOverrideM = fogTopOverrideM
             request.edgeFeatherM = edgeFeatherM
-            let report = try await pipeline.run(request, elevation: elevation)
+            let report = try await pipeline.run(request, elevation: elevation, policy: policy)
             guard !Task.isCancelled else { return }
             self.report = report
             failure = nil
@@ -112,7 +129,8 @@ final class FogStore {
             onStations?(report.grid.usedStations.filter { $0.source == "metar" })
             await prepareAndPaint(report)
         } catch {
-            guard !Task.isCancelled else { return }
+            // Nothing cached is not a failure; the normal run follows.
+            guard !Task.isCancelled, requested == .normal else { return }
             failure = "\(error)"
         }
     }

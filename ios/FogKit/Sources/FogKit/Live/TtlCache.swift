@@ -20,12 +20,17 @@ public struct CacheStats: Sendable, Equatable {
 /// * **Stale on error.** An expired entry is kept until it is successfully
 ///   replaced, and served if the refresh fails: an hour-old forecast beats no
 ///   forecast.
+///
+/// With `persistence`, entries also survive a relaunch: a miss in memory loads
+/// the persisted entry, aged by wall-clock time, and every successful fetch is
+/// written back. The three properties above then hold across launches too.
 public actor TtlCache<Key: Hashable & Sendable, Value: Sendable> {
     public typealias Clock = @Sendable () -> TimeInterval
 
     public let ttlSeconds: TimeInterval
     public let maxEntries: Int
     private let clock: Clock
+    private let persistence: CachePersistence<Key, Value>?
     private var entries: [Key: (value: Value, storedAt: TimeInterval)] = [:]
     /// Insertion order, oldest first, for eviction.
     private var order: [Key] = []
@@ -37,19 +42,25 @@ public actor TtlCache<Key: Hashable & Sendable, Value: Sendable> {
     public init(
         ttlSeconds: TimeInterval,
         maxEntries: Int = 8,
-        clock: @escaping Clock = { ProcessInfo.processInfo.systemUptime }
+        clock: @escaping Clock = { ProcessInfo.processInfo.systemUptime },
+        persistence: CachePersistence<Key, Value>? = nil
     ) {
         self.ttlSeconds = ttlSeconds
         self.maxEntries = max(1, maxEntries)
         self.clock = clock
+        self.persistence = persistence
     }
 
     /// A fresh value without fetching, or nil.
-    public func peek(_ key: Key) -> Value? { fresh(key) }
+    public func peek(_ key: Key) -> Value? {
+        hydrate(key)
+        return fresh(key)
+    }
 
     /// How long ago this key was last successfully stored, fresh or not.
     public func ageSeconds(_ key: Key) -> TimeInterval? {
-        entries[key].map { clock() - $0.storedAt }
+        hydrate(key)
+        return entries[key].map { clock() - $0.storedAt }
     }
 
     public func clear() {
@@ -62,8 +73,17 @@ public actor TtlCache<Key: Hashable & Sendable, Value: Sendable> {
     }
 
     /// The cached value, or the result of `factory` awaited once across all
-    /// concurrent callers for this key.
-    public func value(for key: Key, factory: @escaping @Sendable () async throws -> Value) async throws -> Value {
+    /// concurrent callers for this key. With `.cacheOnly`, whatever is cached
+    /// however old, or `CacheMiss`; the factory is never called.
+    public func value(
+        for key: Key, policy: FetchPolicy = .normal,
+        factory: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        hydrate(key)
+        if policy == .cacheOnly {
+            guard let entry = entries[key] else { throw CacheMiss() }
+            return entry.value
+        }
         if let value = fresh(key) {
             hits += 1
             return value
@@ -98,12 +118,24 @@ public actor TtlCache<Key: Hashable & Sendable, Value: Sendable> {
         }
     }
 
+    /// Bring a persisted entry into memory, backdated by its age so the TTL
+    /// applies to it exactly as to one fetched in this process.
+    private func hydrate(_ key: Key) {
+        guard entries[key] == nil, let (value, age) = persistence?.load(key) else { return }
+        insert(key, value, storedAt: clock() - age)
+    }
+
     private func fresh(_ key: Key) -> Value? {
         guard let entry = entries[key], clock() - entry.storedAt <= ttlSeconds else { return nil }
         return entry.value
     }
 
     private func store(_ key: Key, _ value: Value) {
+        insert(key, value, storedAt: clock())
+        persistence?.save(key, value)
+    }
+
+    private func insert(_ key: Key, _ value: Value, storedAt: TimeInterval) {
         if entries[key] == nil {
             while entries.count >= maxEntries, let oldest = order.first {
                 order.removeFirst()
@@ -111,6 +143,6 @@ public actor TtlCache<Key: Hashable & Sendable, Value: Sendable> {
             }
             order.append(key)
         }
-        entries[key] = (value, clock())
+        entries[key] = (value, storedAt)
     }
 }

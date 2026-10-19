@@ -69,9 +69,11 @@ import Testing
 
 // MARK: - Provider level: the property that actually removes the 429
 
-func hourlyPayload(hours: Int = 48, extra: [String: Any] = [:]) -> [[String: Any]] {
+/// A payload whose window starts at `start` (00:00 UTC on `testNow`'s day by
+/// default), with real, increasing hourly timestamps.
+func hourlyPayload(hours: Int = 48, start: Date = windowStart, extra: [String: Any] = [:]) -> [[String: Any]] {
     var hourly: [String: Any] = [
-        "time": (0..<hours).map { String(format: "2026-09-05T%02d:00", $0 % 24) },
+        "time": (0..<hours).map { OpenMeteoClient.timeFormatter.string(from: start.addingTimeInterval(Double($0) * 3600)) },
         "temperature_2m": (0..<hours).map { 15.0 + Double($0) * 0.01 },
         "precipitation": Array(repeating: 0.0, count: hours),
         "wind_speed_10m": Array(repeating: 10.0, count: hours),
@@ -88,7 +90,7 @@ func hourlyPayload(hours: Int = 48, extra: [String: Any] = [:]) -> [[String: Any
 /// a timeline drag costs 1 upstream request rather than 168.
 @Test func everyHourOfTheTimelineCostsOneForecastRequest() async throws {
     let fetcher = FakeFetcher { _ in (200, hourlyPayload()) }
-    let client = OpenMeteoClient(fetcher: fetcher, cacheTTLSeconds: 900)
+    let client = OpenMeteoClient(fetcher: fetcher, cacheTTLSeconds: 900, now: { testNow })
 
     var times: [String] = []
     for hour in 0..<24 {
@@ -100,7 +102,7 @@ func hourlyPayload(hours: Int = 48, extra: [String: Any] = [:]) -> [[String: Any
 
 @Test func aDifferentVariableSetIsADifferentCacheEntry() async throws {
     let fetcher = FakeFetcher { _ in (200, hourlyPayload()) }
-    let client = OpenMeteoClient(fetcher: fetcher, cacheTTLSeconds: 900)
+    let client = OpenMeteoClient(fetcher: fetcher, cacheTTLSeconds: 900, now: { testNow })
     _ = try await client.forecastPoints([(37.7, -122.4)], hourIndex: 0)
     _ = try await client.forecastPoints([(37.7, -122.4)], hourIndex: 0, includeOptional: true)
     #expect(fetcher.requestCount == 2)
