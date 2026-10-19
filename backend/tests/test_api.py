@@ -231,6 +231,63 @@ def test_an_upstream_forecast_failure_is_a_502(client, monkeypatch):
     assert "upstream down" in response.json()["detail"]
 
 
+def test_a_clear_forecast_sample_cannot_cap_the_slab(client, monkeypatch):
+    """Only observations are hard bounds on the slab; model samples are not.
+
+    Reproduces 2026-10-19 05:00 UTC: one Open-Meteo lattice point on 80 m of
+    model terrain diagnosed clear, was treated as a "clear elevated station",
+    and lowered the top of a 300 m inversion to its own elevation -- emptying
+    the fog field across the whole domain on a night the METARs called foggy.
+    A 2-11 km model sample is interpolated like any other, but it is not an
+    instrument, and it must not override the sounding.
+    """
+
+    async def one_clear_hill_sample(coordinates, hour_index, **kwargs):
+        points = [_forecast_point(lat, lon) for lat, lon in coordinates]
+        points[0] = _forecast_point(
+            *coordinates[0],
+            elevation=80.0,
+            values={"visibility": 16000.0, "dew_point_2m": 6.0, "cloud_cover_low": 0.0},
+        )
+        return points
+
+    monkeypatch.setattr(main.client, "forecast_points", one_clear_hill_sample)
+    slab = client.post(
+        "/v1/fog-grid", json={"grid_x": GRID_X, "grid_y": GRID_Y}
+    ).json()["slab"]
+
+    assert slab["top_m"] >= 300.0
+    assert "clear elevated station" not in slab["source"]
+
+
+def test_a_clear_elevated_metar_still_bounds_the_slab(client, monkeypatch):
+    """The rule itself stands for real instruments: a hill station reporting
+    clear air above the deck proves the top is below it."""
+
+    async def with_a_clear_hill_station(station_ids, max_age_minutes=90):
+        return [
+            MetarObservation(
+                station_id="KHAF", latitude=37.5134, longitude=-122.5011,
+                elevation_m=20.0, observed_at="2026-08-30 15:00", visibility_m=400.0,
+                ceiling_m=60.0, low_cloud_fraction=1.0, reports_fog=True,
+            ),
+            MetarObservation(
+                station_id="HILL", latitude=37.75, longitude=-122.45,
+                elevation_m=150.0, observed_at="2026-08-30 15:00",
+                temperature_c=20.0, dew_point_c=8.0, visibility_m=16000.0,
+                low_cloud_fraction=0.0,
+            ),
+        ]
+
+    monkeypatch.setattr(main.metar_client, "observations", with_a_clear_hill_station)
+    slab = client.post(
+        "/v1/fog-grid", json={"grid_x": GRID_X, "grid_y": GRID_Y}
+    ).json()["slab"]
+
+    assert slab["top_m"] == 150.0
+    assert "clear elevated station" in slab["source"]
+
+
 def test_grid_bounds_are_validated():
     from fastapi.testclient import TestClient as RawClient
 

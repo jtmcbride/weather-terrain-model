@@ -104,8 +104,10 @@ import Testing
     #expect(fetcher.requestCount == 3)
     let expected: [Double] = coordinates.map { ($0.latitude * 1e5).rounded() / 1e5 }
     #expect(points.map(\.latitude) == expected)
-    #expect(fetcher.requests.current[0].query("latitude")!.hasPrefix("37.00000,37.00100,"))
-    #expect(fetcher.requests.current[0].query("forecast_days") == "7")
+    // Batches are fetched concurrently, so they can arrive in any order.
+    let requests = fetcher.requests.current
+    #expect(requests.contains { $0.query("latitude")!.hasPrefix("37.00000,37.00100,") })
+    #expect(requests.allSatisfy { $0.query("forecast_days") == "7" })
 }
 
 /// `visibility` and `boundary_layer_height` are model-dependent. A 400 is a

@@ -144,6 +144,10 @@ public final class FogPipeline: Sendable {
 
         let fetchSeconds = seconds(clock.now - fetchStarted)
         let winds = forecastPoints.compactMap { $0.values["wind_speed_10m"] }.map { $0 * kmhToMs }
+        // Only instruments are hard bounds on the slab. Forecast samples are
+        // 2-11 km model output: interpolated like any station, but one "clear"
+        // sample on a model hillside must not cap the inversion.
+        let observed = stations.filter { $0.source == "metar" }
         var slab = diagnoseSlab(
             levelsByPoint: forecastPoints.map(\.levels),
             surfaceValues: forecastPoints.map {
@@ -151,9 +155,9 @@ public final class FogPipeline: Sendable {
                     temperature2m: $0.values["temperature_2m"], dewPoint2m: $0.values["dew_point_2m"],
                     boundaryLayerHeight: $0.values["boundary_layer_height"])
             },
-            foggedStationElevations: stations.filter(\.isFogged).map(\.elevation),
+            foggedStationElevations: observed.filter(\.isFogged).map(\.elevation),
             observedCeilingsM: metarCeilings,
-            clearStationElevations: stations.filter { $0.fogFraction < 0.2 }.map(\.elevation),
+            clearStationElevations: observed.filter { $0.fogFraction < 0.2 }.map(\.elevation),
             defaultTopM: config.defaultFogTopM,
             meanWindMs: winds.isEmpty ? nil : winds.reduce(0, +) / Double(winds.count))
         if let top = request.fogTopOverrideM { slab = overrideSlabTop(slab, topM: top) }

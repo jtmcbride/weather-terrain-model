@@ -375,15 +375,20 @@ async def fog_grid(request: FogGridRequest) -> FogGridResponse:
         for point in forecast_points
         if point.values.get("wind_speed_10m") is not None
     ]
+    # Only instruments are hard bounds on the slab. Forecast samples are 2-11
+    # km model output: they are interpolated like any station, but letting one
+    # "clear" sample on a model hillside cap the inversion emptied the whole
+    # field on a night the METARs called foggy.
+    observed = [station for station in stations if station.source == "metar"]
     slab = diagnose_slab(
         levels_by_point=[point.levels for point in forecast_points],
         surface_values=[point.values for point in forecast_points],
         fogged_station_elevations=[
-            station.elevation for station in stations if station.is_fogged
+            station.elevation for station in observed if station.is_fogged
         ],
         observed_ceilings_m=metar_ceilings,
         clear_station_elevations=[
-            station.elevation for station in stations if station.fog_fraction < 0.2
+            station.elevation for station in observed if station.fog_fraction < 0.2
         ],
         default_top_m=settings.default_fog_top_m,
         mean_wind_ms=float(np.mean(winds)) if winds else None,

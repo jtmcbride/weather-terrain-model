@@ -254,12 +254,14 @@ def sf_cases() -> list[dict]:
         FogStationInput(source="metar", station_id="KSAC", latitude=38.51,
                         longitude=-121.49, elevation=8.0, fog_fraction=0.0),
     ]
+    # As main.fog_grid: only METARs are hard bounds on the slab.
+    observed = [s for s in stations if s.source == "metar"]
     diagnosed = diagnose_slab(
         levels_by_point=[MARINE_SOUNDING, MARINE_SOUNDING, DEEP_SOUNDING],
         surface_values=[{"temperature_2m": 14.0, "dew_point_2m": 13.4}],
-        fogged_station_elevations=[s.elevation for s in stations if s.is_fogged],
+        fogged_station_elevations=[s.elevation for s in observed if s.is_fogged],
         observed_ceilings_m=[300.0],
-        clear_station_elevations=[s.elevation for s in stations if s.fog_fraction < 0.2],
+        clear_station_elevations=[s.elevation for s in observed if s.fog_fraction < 0.2],
         mean_wind_ms=5.5,
     )
     return [

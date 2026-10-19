@@ -28,21 +28,42 @@ private func forecastPoint(_ latitude: Double, _ longitude: Double, dropVisibili
 private struct StubForecasts: ForecastSource {
     var fail = false
     var dropVisibility = false
+    /// Make the first lattice point a clear sample on 80 m of model terrain.
+    var clearHillSample = false
 
     func forecastPoints(
         _ coordinates: [(latitude: Double, longitude: Double)], hourIndex: Int,
         includeOptional: Bool, includeLevels: Bool
     ) async throws -> [ForecastPoint] {
         if fail { throw UpstreamDown() }
-        return coordinates.map { forecastPoint($0.latitude, $0.longitude, dropVisibility: dropVisibility) }
+        var points = coordinates.map { forecastPoint($0.latitude, $0.longitude, dropVisibility: dropVisibility) }
+        if clearHillSample {
+            points[0].elevation = 80
+            points[0].values["visibility"] = 16000
+            points[0].values["dew_point_2m"] = 6
+            points[0].values["cloud_cover_low"] = 0
+        }
+        return points
     }
 }
 
 private struct StubMetars: ObservationSource {
     var fail = false
+    /// Replace KSFO with a clear station on a 150 m hill.
+    var clearHillStation = false
 
     func observations(stationIDs: [String], maxAgeMinutes: Int) async throws -> [MetarObservation] {
         if fail { throw UpstreamDown() }
+        if clearHillStation {
+            return [
+                MetarObservation(
+                    stationID: "KHAF", latitude: 37.5134, longitude: -122.5011, elevationM: 20,
+                    visibilityM: 400, ceilingM: 60, lowCloudFraction: 1, reportsFog: true),
+                MetarObservation(
+                    stationID: "HILL", latitude: 37.75, longitude: -122.45, elevationM: 150,
+                    temperatureC: 20, dewPointC: 8, visibilityM: 16000, lowCloudFraction: 0),
+            ]
+        }
         return [
             MetarObservation(
                 stationID: "KHAF", latitude: 37.5134, longitude: -122.5011, elevationM: 20,
@@ -129,6 +150,22 @@ private func run(_ pipeline: FogPipeline = pipeline(), _ configure: (inout FogRe
 }
 
 /// A wider feather softens the fog line, so more cells sit part-fogged.
+/// Only observations are hard bounds on the slab. Reproduces 2026-10-19
+/// 05:00 UTC, when one clear Open-Meteo sample on a model hillside lowered a
+/// 300 m inversion to its own elevation and emptied the fog field.
+@Test func aClearForecastSampleCannotCapTheSlab() async throws {
+    let slab = try await run(pipeline(forecasts: StubForecasts(clearHillSample: true))).slab
+    #expect(slab.topM >= 300)
+    #expect(!slab.source.contains("clear elevated station"))
+}
+
+/// The rule still stands for real instruments.
+@Test func aClearElevatedMetarStillBoundsTheSlab() async throws {
+    let slab = try await run(pipeline(metars: StubMetars(clearHillStation: true))).slab
+    #expect(slab.topM == 150)
+    #expect(slab.source.contains("clear elevated station"))
+}
+
 @Test func theEdgeFeatherIsARequestLevelKnob() async throws {
     func partialCells(_ feather: Double) async throws -> Int {
         try await run { $0.edgeFeatherM = feather }.grid.fogFraction.values.filter { 0.02 < $0 && $0 < 0.98 }.count
